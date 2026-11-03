@@ -4,6 +4,7 @@ mod links;
 mod presets;
 mod settings;
 mod system;
+mod traffic;
 
 use serde::Serialize;
 use settings::{Mode, Server, Settings, Subscription};
@@ -28,6 +29,16 @@ pub struct AppState {
     pub launch: Launch,
     /// Найденное, но ещё не установленное обновление.
     pub update: Mutex<Option<tauri_plugin_updater::Update>>,
+    /// Расход трафика по серверам за каждый месяц.
+    pub traffic: traffic::Traffic,
+}
+
+#[derive(Serialize)]
+struct MonthTraffic {
+    /// «2026-11»
+    month: String,
+    /// id сервера → сколько прошло за месяц.
+    servers: std::collections::HashMap<String, traffic::Usage>,
 }
 
 #[derive(Serialize)]
@@ -65,6 +76,7 @@ impl AppState {
             api_port: self.core.api_port,
             secret: self.core.secret.clone(),
             elevated: system::is_elevated(),
+            windows: cfg!(windows),
         }
     }
 }
@@ -77,6 +89,8 @@ struct Status {
     api_port: u16,
     secret: String,
     elevated: bool,
+    /// TUN, права администратора и автозапуск пока есть только в Windows.
+    windows: bool,
 }
 
 #[derive(Serialize)]
@@ -173,13 +187,20 @@ async fn fetch_subscription(url: &str) -> Result<Vec<String>, String> {
 }
 
 /// Заменить серверы одной подписки свежим списком.
+/// Сервер с тем же ключом сохраняет id — на нём держится счётчик трафика за месяц.
 fn merge_subscription(s: &mut Settings, url: &str, links_list: Vec<String>) {
     let old_selected_link = s.selected_server().map(|srv| srv.link.clone());
+    let mut old_ids: std::collections::HashMap<String, String> = s
+        .servers
+        .iter()
+        .filter(|srv| srv.subscription.as_deref() == Some(url))
+        .map(|srv| (srv.link.clone(), srv.id.clone()))
+        .collect();
     s.servers.retain(|srv| srv.subscription.as_deref() != Some(url));
     for link in links_list {
         if let Ok(p) = links::parse(&link) {
             s.servers.push(Server {
-                id: new_id(),
+                id: old_ids.remove(&link).unwrap_or_else(new_id),
                 name: p.name,
                 link,
                 subscription: Some(url.to_string()),
@@ -299,6 +320,12 @@ fn disconnect(app: AppHandle, state: State<AppState>) -> Status {
 #[tauri::command]
 fn get_status(state: State<AppState>) -> Status {
     state.status()
+}
+
+#[tauri::command]
+fn get_traffic(state: State<AppState>) -> MonthTraffic {
+    let month = traffic::current_month();
+    MonthTraffic { servers: state.traffic.month(&month), month }
 }
 
 /// Пинг серверов. Пока VPN включён, каждый сервер проверяется реальным запросом
@@ -640,6 +667,7 @@ pub fn run() {
             app.manage(AppState {
                 settings: Mutex::new(settings),
                 core: core::Core::new(),
+                traffic: traffic::Traffic::load(data_dir.join("traffic.json")),
                 data_dir,
                 launch,
                 update: Mutex::new(None),
@@ -682,6 +710,7 @@ pub fn run() {
             connect,
             disconnect,
             get_status,
+            get_traffic,
             ping_servers,
             list_processes,
             get_logs,
@@ -704,6 +733,7 @@ pub fn run() {
         if let RunEvent::Exit = event {
             if let Some(state) = handle.try_state::<AppState>() {
                 state.core.stop();
+                state.traffic.save();
             }
         }
     });

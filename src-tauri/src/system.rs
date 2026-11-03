@@ -1,5 +1,6 @@
 //! Системные вещи Windows: права администратора, системный прокси,
-//! список запущенных программ, открытие папки. На других ОС — заглушки.
+//! список запущенных программ, открытие папки. На macOS — системный прокси через
+//! networksetup, остальное — заглушки.
 
 use serde::Serialize;
 
@@ -58,6 +59,94 @@ mod win {
     }
 }
 
+#[cfg(target_os = "macos")]
+mod mac {
+    use std::process::Command;
+
+    const NETWORKSETUP: &str = "/usr/sbin/networksetup";
+
+    /// Включённые сетевые службы («Wi-Fi», «Ethernet»). Первая строка вывода — пояснение,
+    /// выключенные службы помечены «*».
+    fn services() -> Vec<String> {
+        let Ok(out) = Command::new(NETWORKSETUP).arg("-listallnetworkservices").output() else {
+            return vec![];
+        };
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .skip(1)
+            .filter(|l| !l.trim().is_empty() && !l.starts_with('*'))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// networksetup пишет ошибки в stdout и не всегда меняет код выхода.
+    fn run(args: &[&str]) -> Result<(), String> {
+        let out = Command::new(NETWORKSETUP).args(args).output().map_err(|e| e.to_string())?;
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if out.status.success() && !text.contains("Error") {
+            Ok(())
+        } else {
+            Err(text.trim().to_string())
+        }
+    }
+
+    /// Выполнить команды для каждой службы. Хватает, чтобы сработало хотя бы на одной.
+    fn for_each_service(cmds: impl Fn(&str) -> Vec<Vec<String>>) -> Result<(), String> {
+        let list = services();
+        if list.is_empty() {
+            return Err("Не нашлось ни одного сетевого подключения".into());
+        }
+        let mut ok = false;
+        let mut last_err = String::new();
+        for svc in &list {
+            let res = cmds(svc)
+                .iter()
+                .try_for_each(|c| run(&c.iter().map(String::as_str).collect::<Vec<_>>()));
+            match res {
+                Ok(()) => ok = true,
+                Err(e) => last_err = e,
+            }
+        }
+        if ok {
+            Ok(())
+        } else {
+            Err(format!("macOS не дала изменить системный прокси: {last_err}"))
+        }
+    }
+
+    pub fn set_proxy(port: u16) -> Result<(), String> {
+        let port = port.to_string();
+        for_each_service(|svc| {
+            let s = svc.to_string();
+            let p = port.clone();
+            let mut bypass = vec!["-setproxybypassdomains".to_string(), s.clone()];
+            bypass.extend(
+                ["localhost", "127.0.0.1", "*.local", "169.254/16", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+                    .map(String::from),
+            );
+            vec![
+                vec!["-setwebproxy".into(), s.clone(), "127.0.0.1".into(), p.clone()],
+                vec!["-setsecurewebproxy".into(), s.clone(), "127.0.0.1".into(), p.clone()],
+                vec!["-setsocksfirewallproxy".into(), s, "127.0.0.1".into(), p],
+                bypass,
+            ]
+        })
+    }
+
+    pub fn clear_proxy() -> Result<(), String> {
+        for_each_service(|svc| {
+            ["-setwebproxystate", "-setsecurewebproxystate", "-setsocksfirewallproxystate"]
+                .iter()
+                .map(|cmd| vec![cmd.to_string(), svc.to_string(), "off".into()])
+                .collect()
+        })
+    }
+}
+
 pub fn is_elevated() -> bool {
     #[cfg(windows)]
     {
@@ -87,6 +176,8 @@ pub fn set_system_proxy(port: u16) -> Result<(), String> {
         key.set_value("ProxyEnable", &1u32).map_err(|e| e.to_string())?;
         win::refresh_inet();
     }
+    #[cfg(target_os = "macos")]
+    mac::set_proxy(port)?;
     #[cfg(not(windows))]
     let _ = (port, INET_KEY, BYPASS);
     Ok(())
@@ -103,6 +194,8 @@ pub fn clear_system_proxy() -> Result<(), String> {
         key.set_value("ProxyEnable", &0u32).map_err(|e| e.to_string())?;
         win::refresh_inet();
     }
+    #[cfg(target_os = "macos")]
+    mac::clear_proxy()?;
     Ok(())
 }
 

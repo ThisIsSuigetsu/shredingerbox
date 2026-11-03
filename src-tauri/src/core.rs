@@ -58,6 +58,11 @@ impl Core {
         *self.mode.lock().unwrap()
     }
 
+    /// Номер текущего запуска ядра: растёт при каждом старте и остановке.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
     pub fn is_running(&self) -> bool {
         self.child.lock().unwrap().is_some()
     }
@@ -104,6 +109,9 @@ impl Core {
     pub async fn start(&self, app: &AppHandle, settings: &Settings, data_dir: &Path) -> Result<(), String> {
         self.stop();
 
+        if settings.mode == Mode::Tun && !crate::settings::TUN_AVAILABLE {
+            return Err("Режим TUN пока есть только в Windows — включи «Прокси»".into());
+        }
         if settings.mode == Mode::Tun && !system::is_elevated() {
             return Err("NEED_ADMIN".into());
         }
@@ -151,7 +159,11 @@ impl Core {
         *self.mode.lock().unwrap() = Some(settings.mode);
 
         if settings.mode == Mode::Proxy {
-            system::set_system_proxy(settings.advanced.mixed_port)?;
+            // Без системного прокси трафик в ядро не пойдёт — тогда и ядро не держим.
+            if let Err(e) = system::set_system_proxy(settings.advanced.mixed_port) {
+                self.stop();
+                return Err(e);
+            }
             self.proxy_set.store(true, Ordering::SeqCst);
         }
 
@@ -186,6 +198,7 @@ impl Core {
                 }
             }
         });
+        crate::traffic::spawn_counter(app.clone(), gen, self.api_port, self.secret.clone());
 
         Ok(())
     }

@@ -1,6 +1,6 @@
 [package]
 name = "shredingerbox"
-version = "0.5.2"
+version = "0.6.0"
 description = "ShredingerBox — простой VPN-клиент на sing-box"
 edition = "2021"
 license = "GPL-3.0-or-later"
@@ -25,6 +25,8 @@ percent-encoding = "2"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 tokio = { version = "1", features = ["net", "time"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+url = "2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"

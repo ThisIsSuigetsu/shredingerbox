@@ -23,8 +23,16 @@ fn exe_regex(exe: &str) -> String {
     format!("(?i)(^|[\\\\/]){escaped}$")
 }
 
+/// «Госуслуги.рф» → «xn--c1aapkosapc.xn--p1ai»: sing-box сравнивает домены только в ASCII.
+fn ascii_domain(d: &str) -> String {
+    url::Url::parse(&format!("http://{d}"))
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| d.to_string())
+}
+
 fn dedup(mut v: Vec<String>) -> Vec<String> {
-    v.iter_mut().for_each(|s| *s = s.trim().trim_start_matches("*.").to_ascii_lowercase());
+    v.iter_mut().for_each(|s| *s = ascii_domain(s.trim().trim_start_matches("*.")).to_ascii_lowercase());
     v.retain(|s| !s.is_empty());
     v.sort();
     v.dedup();
@@ -41,6 +49,7 @@ pub fn build(settings: &Settings, servers: &[(String, Value)], selected_tag: &st
     let mut domains = rules.proxy_domains.clone();
     domains.extend(presets::domains_for(&rules.presets));
     let domains = dedup(domains);
+    let direct_domains = dedup(rules.direct_domains.clone());
     let proxy_apps: Vec<String> = rules.proxy_apps.iter().map(|a| exe_regex(&a.exe)).collect();
     let direct_apps: Vec<String> = rules.direct_apps.iter().map(|a| exe_regex(&a.exe)).collect();
 
@@ -55,7 +64,11 @@ pub fn build(settings: &Settings, servers: &[(String, Value)], selected_tag: &st
 
     // ВАЖНО: правило с пустым списком в sing-box совпадает со всем подряд,
     // поэтому добавляем правило только если в списке что-то есть.
+    // «Сайты напрямую» — исключения (банки, госуслуги), поэтому они стоят первыми.
     let mut dns_rules = vec![];
+    if !direct_domains.is_empty() {
+        dns_rules.push(json!({ "domain_suffix": direct_domains, "server": "dns-local" }));
+    }
     if !direct_apps.is_empty() {
         dns_rules.push(json!({ "process_path_regex": direct_apps, "server": "dns-local" }));
     }
@@ -71,6 +84,9 @@ pub fn build(settings: &Settings, servers: &[(String, Value)], selected_tag: &st
         json!({ "protocol": "dns", "action": "hijack-dns" }),
         json!({ "ip_is_private": true, "outbound": "direct" }),
     ];
+    if !direct_domains.is_empty() {
+        route_rules.push(json!({ "domain_suffix": direct_domains, "outbound": "direct" }));
+    }
     if !direct_apps.is_empty() {
         route_rules.push(json!({ "process_path_regex": direct_apps, "outbound": "direct" }));
     }
@@ -89,14 +105,18 @@ pub fn build(settings: &Settings, servers: &[(String, Value)], selected_tag: &st
         "listen_port": adv.mixed_port
     })];
     if settings.mode == Mode::Tun {
-        inbounds.push(json!({
+        let mut tun = json!({
             "type": "tun",
             "tag": "tun-in",
-            "interface_name": "ShredingerBox",
             "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
             "auto_route": true,
             "strict_route": true
-        }));
+        });
+        // На macOS адаптер обязан называться utunN — там имя выбирает само ядро.
+        if cfg!(windows) {
+            tun["interface_name"] = json!("ShredingerBox");
+        }
+        inbounds.push(tun);
     }
 
     let mut outbounds: Vec<Value> = vec![json!({
@@ -189,6 +209,24 @@ mod tests {
         let domains = rules[5]["domain_suffix"].as_array().unwrap();
         assert!(domains.contains(&json!("example.com")));
         assert!(domains.contains(&json!("googlevideo.com")));
+    }
+
+    #[test]
+    fn direct_domains_win_over_apps_and_presets() {
+        let mut s = Settings::default();
+        s.rules.final_route = FinalRoute::Proxy;
+        s.rules.proxy_apps.push(AppRule { name: "Chrome".into(), exe: "chrome.exe".into() });
+        s.rules.direct_domains =
+            vec!["*.Gosuslugi.ru".into(), "youtube.com".into(), "".into(), "госуслуги.рф".into()];
+        let c = build(&s, &one(json!({"type":"direct"})), "srv-a", &params());
+        let rules = c["route"]["rules"].as_array().unwrap();
+        assert_eq!(
+            rules[3]["domain_suffix"],
+            json!(["gosuslugi.ru", "xn--c1aapkosapc.xn--p1ai", "youtube.com"])
+        );
+        assert_eq!(rules[3]["outbound"], "direct");
+        assert_eq!(rules[4]["outbound"], "proxy");
+        assert_eq!(c["dns"]["rules"][0]["server"], "dns-local");
     }
 
     #[test]

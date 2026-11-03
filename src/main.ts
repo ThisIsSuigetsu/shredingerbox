@@ -15,20 +15,24 @@ interface Settings {
   servers: Server[];
   subscriptions: { url: string; name: string }[];
   selected: string | null;
-  rules: { final_route: FinalRoute; proxy_apps: AppRule[]; direct_apps: AppRule[]; proxy_domains: string[]; presets: string[] };
+  rules: { final_route: FinalRoute; proxy_apps: AppRule[]; direct_apps: AppRule[]; proxy_domains: string[]; direct_domains: string[]; presets: string[] };
   advanced: { enabled: boolean; mixed_port: number; allow_lan: boolean; log_level: string; remote_dns: string };
   reminder: { enabled: boolean; last_shown: string | null };
   general: { autoconnect: boolean; close_to_tray: boolean; clipboard_offer: boolean; check_updates: boolean };
 }
-interface Status { running: boolean; mode: Mode; server: string | null; api_port: number; secret: string; elevated: boolean }
+interface Status { running: boolean; mode: Mode; server: string | null; api_port: number; secret: string; elevated: boolean; windows: boolean }
 interface Preset { id: string; title: string; domains: string[] }
 interface Ping { id: string; ms: number | null; udp: boolean; via_vpn: boolean }
 interface Proc { name: string; exe: string }
 type View = "main" | "servers" | "rules" | "settings";
 type AppList = "proxy_apps" | "direct_apps";
+type SiteList = "proxy_domains" | "direct_domains";
+interface Usage { up: number; down: number }
 type Modal =
   | { kind: "add-server"; busy: boolean; error: string }
   | { kind: "add-app"; list: AppList; tab: "running" | "manual"; text: string; loading: boolean; procs: Proc[]; picked: Set<string>; manual: Proc[] }
+  | { kind: "add-sites"; list: SiteList; text: string }
+  | { kind: "list"; list: AppList | SiteList; filter: string }
   | { kind: "admin" }
   | { kind: "reminder" }
   | { kind: "clipboard"; text: string; busy: boolean; error: string }
@@ -51,6 +55,18 @@ const st = {
   logs: [] as string[],
   autostart: false,
   autostartBusy: false,
+  siteTab: "proxy_domains" as SiteList,
+  /** Расход трафика по серверам за текущий месяц. */
+  usage: { month: "", servers: {} as Record<string, Usage> },
+};
+
+/** Сколько строк показывать в списках правил — остальное в окне «Показать все». */
+const LIST_LIMIT = 10;
+const LIST_TITLE: Record<AppList | SiteList, string> = {
+  proxy_apps: "Приложения через VPN",
+  direct_apps: "Приложения напрямую",
+  proxy_domains: "Сайты через VPN",
+  direct_domains: "Сайты напрямую",
 };
 
 const root = document.getElementById("app")!;
@@ -109,6 +125,29 @@ function speed(bytes: number): string {
   return `${f(bytes / 1024)} КБ/с`;
 }
 
+function bytes(n: number): string {
+  const f = (x: number) => x.toLocaleString("ru-RU", { maximumFractionDigits: 1 });
+  if (n >= 1024 ** 3) return `${f(n / 1024 ** 3)} ГБ`;
+  if (n >= 1024 ** 2) return `${f(n / 1024 ** 2)} МБ`;
+  return `${f(n / 1024)} КБ`;
+}
+
+const MONTHS = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"];
+/** «2026-11» → «ноябрь» */
+const monthName = (month: string) => MONTHS[Number(month.slice(5, 7)) - 1] ?? "месяц";
+
+/** Расход сервера за месяц: короткий текст и подсказка с разбивкой. Пусто, если трафика не было. */
+function usageOf(id: string): { short: string; title: string } {
+  const u = st.usage.servers[id];
+  if (!u || u.up + u.down === 0) return { short: "", title: "" };
+  return { short: bytes(u.up + u.down), title: `За ${monthName(st.usage.month)}: ↓ ${bytes(u.down)} · ↑ ${bytes(u.up)}` };
+}
+
+function usageView(id: string): string {
+  const u = usageOf(id);
+  return `<span class="usage" data-usage-id="${esc(id)}" title="${esc(u.title)}">${esc(u.short)}</span>`;
+}
+
 function elapsed(): string {
   const s = Math.max(0, Math.floor((Date.now() - st.connectedAt) / 1000));
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -152,6 +191,34 @@ function manualStats(m: { list: AppList; text: string }): { add: string[]; dup: 
     if (seen.has(key) || existing.has(key)) { dup++; continue; }
     seen.add(key);
     add.push(exe);
+  }
+  return { add, dup };
+}
+
+/** «https://www.Discord.com/app», «*.discord.com» → «discord.com». Кириллица остаётся как есть,
+ *  в punycode её переводит Rust при сборке конфига. */
+function normalizeDomain(raw: string): string | null {
+  const s = raw.trim().toLowerCase().replace(/^[a-z]+:\/\//, "").replace(/[/?#].*$/, "").replace(/:\d+$/, "")
+    .replace(/^\*?\./, "").replace(/^www\./, "");
+  if (!s || !s.includes(".")) return null;
+  try {
+    const host = new URL(`http://${s}`).hostname;
+    return /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(host) ? s : null;
+  } catch { return null; }
+}
+
+/** Что добавится из поля сайтов: без дубликатов и без уже добавленных в этот список. */
+function siteStats(m: { list: SiteList; text: string }): { add: string[]; dup: number } {
+  const existing = new Set(st.settings!.rules[m.list]);
+  const seen = new Set<string>();
+  const add: string[] = [];
+  let dup = 0;
+  for (const part of m.text.split(/[\s,;]+/)) {
+    const d = normalizeDomain(part);
+    if (!d) continue;
+    if (seen.has(d) || existing.has(d)) { dup++; continue; }
+    seen.add(d);
+    add.push(d);
   }
   return { add, dup };
 }
@@ -263,8 +330,24 @@ async function toggleConnect() {
   st.busy = false;
   syncIndicators();
   render();
+  refreshUsage();
   // Пинг выбранного сервера сразу через туннель
   if (st.status?.running) setTimeout(pingAll, 1500);
+}
+
+/** Берёт у Rust расход за месяц и обновляет цифры на месте, без полной перерисовки. */
+async function refreshUsage() {
+  try { st.usage = await invoke<typeof st.usage>("get_traffic"); } catch { return; }
+  document.querySelectorAll<HTMLElement>("[data-usage-id]").forEach((el) => {
+    const u = usageOf(el.dataset.usageId!);
+    el.textContent = u.short;
+    el.title = u.title;
+  });
+  document.querySelectorAll<HTMLElement>("[data-usage-long]").forEach((el) => {
+    const u = usageOf(el.dataset.usageLong!);
+    el.textContent = u.short ? ` · ${u.short} за ${monthName(st.usage.month)}` : "";
+    el.title = u.title;
+  });
 }
 
 /** Трей и панель задач Rust обновляет сам, а тут — на всякий случай, по настоящему состоянию ядра. */
@@ -351,8 +434,10 @@ function mainView(): string {
   const title = st.busy ? (running ? "Отключаемся…" : "Подключаемся…") : running
     ? `Подключено <span class="timer" id="timer">· ${elapsed()}</span>`
     : "Не подключено";
+  const month = srv ? usageOf(srv.id) : null;
   const sub = srv
-    ? `<span class="flag">${esc(flag!.code)}</span>${esc(flag!.name)}${st.pings[srv.id] ? " · " + pingView(srv.id) : ""}`
+    ? `<span class="flag">${esc(flag!.code)}</span>${esc(flag!.name)}${st.pings[srv.id] ? " · " + pingView(srv.id) : ""}
+       <span data-usage-long="${esc(srv.id)}" title="${esc(month!.title)}">${month!.short ? ` · ${esc(month!.short)} за ${monthName(st.usage.month)}` : ""}</span>`
     : `Добавь сервер, чтобы подключиться`;
 
   const servers = s.servers.length
@@ -365,8 +450,9 @@ function mainView(): string {
       }).join("")
     : `<div class="empty">Серверов пока нет. Вставь ключ <span class="mono">vless://</span>, <span class="mono">hy2://</span> или ссылку на подписку.</div>`;
 
-  const modeOpt = (m: Mode, t: string, d: string) =>
-    `<button class="mode-opt ${s.mode === m ? "on" : ""}" data-action="set-mode" data-mode="${m}" aria-pressed="${s.mode === m}">
+  const windows = st.status?.windows ?? true;
+  const modeOpt = (m: Mode, t: string, d: string, off = false) =>
+    `<button class="mode-opt ${s.mode === m ? "on" : ""}" data-action="set-mode" data-mode="${m}" aria-pressed="${s.mode === m}" ${off ? "disabled" : ""}>
       <span class="radio"></span><span><b>${t}</b><span>${d}</span></span></button>`;
 
   return `<div class="home">
@@ -386,7 +472,7 @@ function mainView(): string {
     <div class="home-side">
       <section class="card">
         <h2>Режим</h2>
-        ${modeOpt("tun", "TUN", "Весь трафик системы по правилам")}
+        ${windows ? modeOpt("tun", "TUN", "Весь трафик системы по правилам") : modeOpt("tun", "TUN", "Пока только в Windows", true)}
         ${modeOpt("proxy", "Прокси", "Только программы с системным прокси")}
       </section>
       <section class="card servers">
@@ -401,7 +487,7 @@ function mainView(): string {
 function serverRow(x: Server, current: Server | undefined): string {
   const f = splitFlag(x.name);
   return `<div class="server ${x.id === current?.id ? "on" : ""}" role="button" tabindex="0" data-action="select-server" data-id="${x.id}">
-    <span class="flag">${esc(f.code)}</span><span class="name" title="${esc(x.name)}">${esc(f.name)}</span>${pingView(x.id)}
+    <span class="flag">${esc(f.code)}</span><span class="name" title="${esc(x.name)}">${esc(f.name)}</span>${usageView(x.id)}${pingView(x.id)}
     <button class="del" data-action="remove-server" data-id="${x.id}" aria-label="Удалить сервер">${icon.x(13)}</button>
   </div>`;
 }
@@ -435,7 +521,8 @@ function serversView(): string {
     ? `<section class="card"><div class="empty">Серверов пока нет. Вставь ключ или ссылку на подписку.</div></section>`
     : "";
   return `<div class="page-head">
-      <div><h1>Серверы</h1><p>Подписки и ключи. Пока VPN включён, пинг каждого сервера меряется через туннель, а переключение мгновенное.</p></div>
+      <div><h1>Серверы</h1><p>Подписки и ключи. Пока VPN включён, пинг каждого сервера меряется через туннель, а переключение мгновенное.
+        Рядом с сервером — расход трафика за ${monthName(st.usage.month || "0000-00")}, наведи, чтобы увидеть загрузку и отдачу.</p></div>
       <div style="display:flex;gap:8px">
         ${s.servers.length ? `<button class="btn-ghost" data-action="ping">Проверить пинг</button>` : ""}
         <button class="btn-light" data-action="open-add-server">Добавить</button>
@@ -444,24 +531,48 @@ function serversView(): string {
     <div class="settings" style="max-width:none">${empty}${groups}${manualCard}</div>`;
 }
 
-function appCard(list: AppList, title: string, hollow: boolean): string {
-  const apps = st.settings!.rules[list];
-  const rows = apps.length
-    ? apps.map((a) => `<div class="app-row"><div class="app-icon">${esc(a.name.charAt(0).toUpperCase())}</div>
-        <span class="n">${esc(a.name)} <small>· ${esc(a.exe)}</small></span>
-        <button class="x-btn" data-action="remove-app" data-list="${list}" data-exe="${esc(a.exe)}" aria-label="Убрать из списка">${icon.x()}</button></div>`).join("")
-    : `<div class="empty" style="padding:6px 0">Пока пусто</div>`;
+const isAppList = (list: AppList | SiteList): list is AppList => list === "proxy_apps" || list === "direct_apps";
+
+/** Строки списка правил: приложения или сайты, с кнопкой «убрать». */
+function ruleRows(list: AppList | SiteList, filter = "", limit = Infinity): string {
+  const q = filter.trim().toLowerCase();
+  const rows = isAppList(list)
+    ? st.settings!.rules[list]
+        .filter((a) => !q || a.name.toLowerCase().includes(q) || a.exe.toLowerCase().includes(q))
+        .map((a) => `<div class="app-row"><div class="app-icon">${esc(a.name.charAt(0).toUpperCase())}</div>
+          <span class="n">${esc(a.name)} <small>· ${esc(a.exe)}</small></span>
+          <button class="x-btn" data-action="remove-app" data-list="${list}" data-exe="${esc(a.exe)}" aria-label="Убрать ${esc(a.name)} из списка">${icon.x()}</button></div>`)
+    : st.settings!.rules[list]
+        .filter((d) => !q || d.includes(q))
+        .map((d) => `<div class="app-row"><div class="app-icon">${esc(d.charAt(0).toUpperCase())}</div>
+          <span class="n">${esc(d)}</span>
+          <button class="x-btn" data-action="remove-domain" data-list="${list}" data-domain="${esc(d)}" aria-label="Убрать ${esc(d)} из списка">${icon.x()}</button></div>`);
+  if (!rows.length) return `<div class="empty" style="padding:6px 0">${q ? "Ничего не нашлось" : "Пока пусто"}</div>`;
+  return rows.slice(0, limit).join("");
+}
+
+/** Первые 10 строк и кнопка «Показать все», если их больше. */
+function ruleList(list: AppList | SiteList): string {
+  const total = st.settings!.rules[list].length;
+  const more = total > LIST_LIMIT
+    ? `<button class="link-btn more" data-action="show-list" data-list="${list}">Показать все (${total})</button>`
+    : "";
+  return ruleRows(list, "", LIST_LIMIT) + more;
+}
+
+function appCard(list: AppList, hollow: boolean): string {
   return `<section class="card" style="gap:2px">
-    <div class="card-head" style="padding-bottom:6px"><div style="display:flex;align-items:center;gap:10px"><span class="dot ${hollow ? "hollow" : ""}"></span><h2>${title}</h2></div><span class="count">${apps.length}</span></div>
-    ${rows}
+    <div class="card-head" style="padding-bottom:6px"><div style="display:flex;align-items:center;gap:10px"><span class="dot ${hollow ? "hollow" : ""}"></span><h2>${LIST_TITLE[list]}</h2></div><span class="count">${st.settings!.rules[list].length}</span></div>
+    ${ruleList(list)}
     <button class="dashed" style="margin-top:6px" data-action="open-add-app" data-list="${list}">${icon.plus}Добавить приложение</button>
   </section>`;
 }
 
 function rulesView(): string {
   const r = st.settings!.rules;
-  const chips = r.proxy_domains.map((d) =>
-    `<span class="chip">${esc(d)}<button data-action="remove-domain" data-domain="${esc(d)}" aria-label="Убрать домен">${icon.x(11)}</button></span>`).join("");
+  const tab = st.siteTab;
+  const siteTab = (list: SiteList, label: string) =>
+    `<button role="tab" aria-selected="${tab === list}" class="${tab === list ? "on" : ""}" data-action="site-tab" data-list="${list}">${label} · ${r[list].length}</button>`;
   const presets = st.presets.map((p) => {
     const on = r.presets.includes(p.id);
     return `<button class="preset ${on ? "on" : ""}" data-action="toggle-preset" data-id="${p.id}" aria-pressed="${on}" title="${esc(p.domains.join(", "))}">${on ? "✓ " : ""}${esc(p.title)}</button>`;
@@ -475,19 +586,18 @@ function rulesView(): string {
         </div></div>
     </div>
     <div class="rules-grid">
-      <div class="col">${appCard("proxy_apps", "Приложения через VPN", false)}${appCard("direct_apps", "Приложения напрямую", true)}</div>
-      <div class="col"><section class="card" style="gap:12px">
-        <div class="card-head"><div style="display:flex;align-items:center;gap:10px"><span class="dot"></span><h2>Сайты через VPN</h2></div><span class="count">${r.proxy_domains.length}</span></div>
-        <form class="row-form" data-form="add-domain">
-          <label for="domain" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">Домен</label>
-          <input id="domain" class="field" name="domain" placeholder="например, discord.com" autocomplete="off" />
-          <button class="btn-light" type="submit">Добавить</button>
-        </form>
-        ${chips ? `<div class="chips">${chips}</div>` : ""}
-        <div class="sep"></div>
-        <span class="muted" style="font-size:12px">Готовые наборы — нажми, чтобы включить</span>
-        <div class="chips">${presets}</div>
-        <div class="hint">${icon.info}<span>В режиме «Прокси» правила для приложений работают только у программ, которые используют системный прокси. В режиме TUN — у всех.</span></div>
+      <div class="col">${appCard("proxy_apps", false)}${appCard("direct_apps", true)}</div>
+      <div class="col"><section class="card" style="gap:2px">
+        <div class="card-head" style="padding-bottom:8px"><div style="display:flex;align-items:center;gap:10px"><span class="dot ${tab === "direct_domains" ? "hollow" : ""}"></span><h2>Сайты</h2></div>
+          <div class="seg inset" role="tablist" aria-label="Какие сайты">${siteTab("proxy_domains", "Через VPN")}${siteTab("direct_domains", "Напрямую")}</div></div>
+        ${ruleList(tab)}
+        <button class="dashed" style="margin-top:6px" data-action="open-add-sites">${icon.plus}Добавить сайты</button>
+        ${tab === "proxy_domains"
+          ? `<div class="sep" style="margin:12px 0"></div>
+            <span class="muted" style="font-size:12px;padding-bottom:8px">Готовые наборы — нажми, чтобы включить</span>
+            <div class="chips">${presets}</div>`
+          : `<div class="hint" style="margin-top:12px">${icon.info}<span>Эти сайты всегда идут напрямую — даже из приложений «через VPN» и готовых наборов. Удобно для банков и госуслуг.</span></div>`}
+        <div class="hint" style="margin-top:12px">${icon.info}<span>В режиме «Прокси» правила для приложений работают только у программ, которые используют системный прокси. В режиме TUN — у всех.</span></div>
       </section></div>
     </div>`;
 }
@@ -501,11 +611,12 @@ function settingsView(): string {
   const g = st.settings!.general;
   const sw = (on: boolean, action: string, label: string, busy = false) =>
     `<button class="switch ${on ? "on" : ""}" role="switch" aria-checked="${on}" aria-label="${label}" data-action="${action}" ${busy ? "disabled" : ""}><span></span></button>`;
+  const windows = st.status?.windows ?? true;
   const behaviour = `<section class="card" style="gap:0;padding:6px 16px">
-      <div class="set-row"><div class="t"><b>Запускать вместе с Windows</b><span>Сразу с правами администратора — TUN без окна UAC</span></div>
+      ${windows ? `<div class="set-row"><div class="t"><b>Запускать вместе с Windows</b><span>Сразу с правами администратора — TUN без окна UAC</span></div>
         ${sw(st.autostart, "toggle-autostart", "Запускать вместе с Windows", st.autostartBusy)}</div>
       <div class="set-row"><div class="t"><b>Подключаться при автозапуске</b><span>Клиент стартует в трее и сразу включает VPN</span></div>
-        ${sw(g.autoconnect, "toggle-autoconnect", "Подключаться при автозапуске")}</div>
+        ${sw(g.autoconnect, "toggle-autoconnect", "Подключаться при автозапуске")}</div>` : ""}
       <div class="set-row"><div class="t"><b>Проверять обновления</b><span>Версия ${esc(APP_VERSION)} · новые версии приходят с GitHub</span></div>
         <button class="btn-ghost" data-action="check-update-now" style="height:36px">Проверить</button>
         ${sw(g.check_updates, "toggle-updates", "Проверять обновления")}</div>
@@ -515,8 +626,8 @@ function settingsView(): string {
         ${sw(g.close_to_tray, "toggle-tray", "Сворачивать в трей при закрытии")}</div>
     </section>`;
   const basic = behaviour + `<section class="card" style="gap:0;padding:6px 16px">
-      <div class="set-row"><div class="t"><b>Права администратора</b><span>Нужны для режима TUN</span></div>
-        ${st.status?.elevated ? `<span style="color:var(--accent);font-size:13px;font-weight:600">Есть</span>` : `<button class="btn-ghost" data-action="restart-admin">Перезапустить с правами</button>`}</div>
+      ${windows ? `<div class="set-row"><div class="t"><b>Права администратора</b><span>Нужны для режима TUN</span></div>
+        ${st.status?.elevated ? `<span style="color:var(--accent);font-size:13px;font-weight:600">Есть</span>` : `<button class="btn-ghost" data-action="restart-admin">Перезапустить с правами</button>`}</div>` : ""}
       <div class="set-row"><div class="t"><b>Папка данных</b><span>Настройки, конфиг и кэш ядра</span></div>
         <button class="btn-ghost" data-action="open-data-dir">Открыть</button></div>
       <div class="set-row"><div class="t"><b>Напоминание о продлении подписки</b><span>Каждое 20-е число — написать Suigetsu в Telegram</span></div>
@@ -598,6 +709,30 @@ function modalView(): string {
         </div>
         <span class="grow"></span>
         <button class="btn-accent" id="add-app-btn" data-action="confirm-add-app" ${count ? "" : "disabled"}>Добавить${count ? " · " + count : ""}</button>
+      </div></div>`;
+  } else if (m.kind === "add-sites") {
+    const count = siteStats(m).add.length;
+    body = `<div class="modal" role="dialog" aria-label="Добавить сайты">${head("Добавить сайты")}
+      <div class="modal-body">
+        <label for="site-list" class="muted" style="font-size:13px;line-height:1.5">По одному на строку: <span class="mono">discord.com</span>, ссылка целиком или <span class="mono">*.example.com</span>. Поддомены попадают в правило сами. Можно вставить сразу целый список.</label>
+        <textarea id="site-list" class="field mono" style="height:180px" data-input="site-list" placeholder="discord.com&#10;https://www.youtube.com/&#10;*.example.com" spellcheck="false" autofocus>${esc(m.text)}</textarea>
+        <div class="muted" style="font-size:12px" id="site-stats">${statsText(siteStats(m))}</div>
+      </div>
+      <div class="modal-foot">
+        <div class="seg inset" role="group" aria-label="Куда добавить">
+          <button class="${m.list === "proxy_domains" ? "on" : ""}" data-action="set-site-list" data-list="proxy_domains">Через VPN</button>
+          <button class="${m.list === "direct_domains" ? "on" : ""}" data-action="set-site-list" data-list="direct_domains">Напрямую</button>
+        </div>
+        <span class="grow"></span>
+        <button class="btn-accent" id="add-sites-btn" data-action="confirm-add-sites" ${count ? "" : "disabled"}>Добавить${count ? " · " + count : ""}</button>
+      </div></div>`;
+  } else if (m.kind === "list") {
+    const total = st.settings!.rules[m.list].length;
+    body = `<div class="modal" role="dialog" aria-label="${LIST_TITLE[m.list]}">${head(`${LIST_TITLE[m.list]} <span class="count">· ${total}</span>`)}
+      <div class="modal-body">
+        <label for="list-filter" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">Поиск по списку</label>
+        <input id="list-filter" class="field" data-input="list-filter" placeholder="Поиск" value="${esc(m.filter)}" autocomplete="off" />
+        <div id="full-list" style="display:flex;flex-direction:column;max-height:52vh;overflow:auto">${ruleRows(m.list, m.filter)}</div>
       </div></div>`;
   } else if (m.kind === "update") {
     body = `<div class="modal" role="dialog" aria-label="Доступно обновление">${head(`Доступна версия ${esc(m.version)}`)}
@@ -712,7 +847,30 @@ async function onAction(action: string, el: HTMLElement, ev: Event) {
       const list = el.dataset.list as AppList;
       return saveSettings((x) => { x.rules[list] = x.rules[list].filter((a) => a.exe !== el.dataset.exe); }, "Правила применены");
     }
-    case "remove-domain": return saveSettings((x) => { x.rules.proxy_domains = x.rules.proxy_domains.filter((d) => d !== el.dataset.domain); }, "Правила применены");
+    case "remove-domain": {
+      const list = el.dataset.list as SiteList;
+      return saveSettings((x) => { x.rules[list] = x.rules[list].filter((d) => d !== el.dataset.domain); }, "Правила применены");
+    }
+    case "site-tab": st.siteTab = el.dataset.list as SiteList; return render();
+    case "show-list": st.modal = { kind: "list", list: el.dataset.list as AppList | SiteList, filter: "" }; render(); document.getElementById("list-filter")?.focus(); return;
+    case "open-add-sites": st.modal = { kind: "add-sites", list: st.siteTab, text: "" }; render(); document.getElementById("site-list")?.focus(); return;
+    case "set-site-list": if (st.modal?.kind === "add-sites") { st.modal.list = el.dataset.list as SiteList; render(); } return;
+    case "confirm-add-sites": {
+      const m = st.modal;
+      if (m?.kind !== "add-sites") return;
+      const { add, dup } = siteStats(m);
+      if (!add.length) return toast("Нечего добавлять: всё уже есть в списке", true);
+      const other: SiteList = m.list === "proxy_domains" ? "direct_domains" : "proxy_domains";
+      st.modal = null;
+      st.siteTab = m.list;
+      await saveSettings((x) => {
+        // сайт не может быть одновременно в обоих списках
+        x.rules[other] = x.rules[other].filter((d) => !add.includes(d));
+        x.rules[m.list].push(...add);
+      }, "Правила применены");
+      if (dup) toast(`Добавлено: ${add.length}, дубликатов пропущено: ${dup}`);
+      return;
+    }
     case "toggle-preset": {
       const id = el.dataset.id!;
       return saveSettings((x) => {
@@ -866,6 +1024,25 @@ document.addEventListener("keydown", (ev) => {
 
 document.addEventListener("input", (ev) => {
   const el = ev.target as HTMLTextAreaElement;
+  if (el.dataset.input === "list-filter" && st.modal?.kind === "list") {
+    // Перерисовываем только список, чтобы не сбить курсор в поле поиска.
+    st.modal.filter = el.value;
+    const box = document.getElementById("full-list");
+    if (box) box.innerHTML = ruleRows(st.modal.list, st.modal.filter);
+    return;
+  }
+  if (el.dataset.input === "site-list" && st.modal?.kind === "add-sites") {
+    st.modal.text = el.value;
+    const stats = siteStats(st.modal);
+    const info = document.getElementById("site-stats");
+    const btn = document.getElementById("add-sites-btn") as HTMLButtonElement | null;
+    if (info) info.textContent = statsText(stats);
+    if (btn) {
+      btn.disabled = stats.add.length === 0;
+      btn.textContent = `Добавить${stats.add.length ? " · " + stats.add.length : ""}`;
+    }
+    return;
+  }
   if (el.dataset.input !== "exe-list" || st.modal?.kind !== "add-app") return;
   st.modal.text = el.value;
   const stats = manualStats(st.modal);
@@ -900,13 +1077,6 @@ document.addEventListener("change", (ev) => {
 document.addEventListener("submit", async (ev) => {
   const form = ev.target as HTMLFormElement;
   ev.preventDefault();
-  if (form.dataset.form === "add-domain") {
-    const input = form.elements.namedItem("domain") as HTMLInputElement;
-    const domain = input.value.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "").replace(/^\*\./, "");
-    if (!domain || !domain.includes(".")) return toast("Введи домен, например discord.com", true);
-    if (st.settings!.rules.proxy_domains.includes(domain)) return;
-    return saveSettings((x) => { x.rules.proxy_domains.push(domain); }, "Правила применены");
-  }
   if (form.dataset.form === "add-server" && st.modal?.kind === "add-server") {
     const text = (form.elements.namedItem("link") as HTMLTextAreaElement).value;
     st.modal.busy = true; st.modal.error = "";
@@ -961,6 +1131,9 @@ async function init() {
     const t = document.getElementById("timer");
     if (t && st.status?.running) t.textContent = `· ${elapsed()}`;
   }, 1000);
+  await refreshUsage();
+  render();
+  setInterval(() => { if (st.status?.running) refreshUsage(); }, 5000);
 
   checkReminder();
   setInterval(checkReminder, 30 * 60 * 1000);

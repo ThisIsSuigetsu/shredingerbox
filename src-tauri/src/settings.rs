@@ -3,12 +3,24 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
-    #[default]
     Tun,
     Proxy,
+}
+
+/// TUN пока сделан только для Windows: на macOS для него нужен root и свой помощник.
+pub const TUN_AVAILABLE: bool = cfg!(windows);
+
+impl Default for Mode {
+    fn default() -> Self {
+        if TUN_AVAILABLE {
+            Mode::Tun
+        } else {
+            Mode::Proxy
+        }
+    }
 }
 
 /// Куда идёт трафик, который не попал ни в одно правило.
@@ -51,6 +63,8 @@ pub struct Rules {
     pub proxy_apps: Vec<AppRule>,
     pub direct_apps: Vec<AppRule>,
     pub proxy_domains: Vec<String>,
+    /// Сайты, которые всегда идут напрямую, — даже из приложений «через VPN» и наборов.
+    pub direct_domains: Vec<String>,
     /// Включённые готовые наборы (id из presets.rs).
     pub presets: Vec<String>,
 }
@@ -62,6 +76,7 @@ impl Default for Rules {
             proxy_apps: vec![],
             direct_apps: vec![],
             proxy_domains: vec![],
+            direct_domains: vec![],
             presets: vec!["youtube".into(), "discord".into()],
         }
     }
@@ -140,10 +155,15 @@ pub struct Settings {
 
 impl Settings {
     pub fn load(path: &Path) -> Self {
-        std::fs::read_to_string(path)
+        let mut s: Self = std::fs::read_to_string(path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // Старые версии на Mac сохраняли TUN, который там не работает.
+        if !TUN_AVAILABLE {
+            s.mode = Mode::Proxy;
+        }
+        s
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
