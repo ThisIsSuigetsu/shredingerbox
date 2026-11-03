@@ -1,6 +1,6 @@
 ﻿$ErrorActionPreference = 'Stop'
 $headers = @{ 'User-Agent' = 'ShredingerBox' }
-# В GitHub Actions есть токен — с ним не упираемся в лимит запросов к API
+# В GitHub Actions есть токен - с ним не упираемся в лимит запросов к API
 if ($env:GITHUB_TOKEN) { $headers['Authorization'] = "Bearer $($env:GITHUB_TOKEN)" }
 $rel = Invoke-RestMethod 'https://api.github.com/repos/SagerNet/sing-box/releases/latest' -Headers $headers
 $asset = $rel.assets | Where-Object { $_.name -like '*-windows-amd64.zip' } | Select-Object -First 1

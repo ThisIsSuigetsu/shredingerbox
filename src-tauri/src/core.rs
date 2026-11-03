@@ -110,7 +110,7 @@ impl Core {
         self.stop();
 
         if settings.mode == Mode::Tun && !crate::settings::TUN_AVAILABLE {
-            return Err("Режим TUN пока есть только в Windows — включи «Прокси»".into());
+            return Err("Режим TUN пока есть только в Windows - включи «Прокси»".into());
         }
         if settings.mode == Mode::Tun && !system::is_elevated() {
             return Err("NEED_ADMIN".into());
@@ -132,7 +132,7 @@ impl Core {
         let cfg_path = data_dir.join("config.json").to_string_lossy().to_string();
         let dir = data_dir.to_string_lossy().to_string();
 
-        // Сначала просим ядро проверить конфиг — так ошибка будет понятной.
+        // Сначала просим ядро проверить конфиг - так ошибка будет понятной.
         let check = app
             .shell()
             .sidecar("sing-box")
@@ -159,7 +159,7 @@ impl Core {
         *self.mode.lock().unwrap() = Some(settings.mode);
 
         if settings.mode == Mode::Proxy {
-            // Без системного прокси трафик в ядро не пойдёт — тогда и ядро не держим.
+            // Без системного прокси трафик в ядро не пойдёт - тогда и ядро не держим.
             if let Err(e) = system::set_system_proxy(settings.advanced.mixed_port) {
                 self.stop();
                 return Err(e);
@@ -185,7 +185,7 @@ impl Core {
                         let state = app2.state::<crate::AppState>();
                         if state.core.generation.load(Ordering::SeqCst) == gen {
                             state.core.mark_stopped();
-                            // Ядро упало само — иконки меняем сразу, даже если окно спрятано.
+                            // Ядро упало само - иконки меняем сразу, даже если окно спрятано.
                             crate::update_indicators(&app2);
                             let _ = app2.emit(
                                 "core-exit",
@@ -203,7 +203,7 @@ impl Core {
         Ok(())
     }
 
-    /// Сбросить состояние после остановки процесса (без убийства — он уже мёртв).
+    /// Сбросить состояние после остановки процесса (без убийства - он уже мёртв).
     fn mark_stopped(&self) {
         self.child.lock().unwrap().take();
         let was_tun = self.mode.lock().unwrap().take() == Some(Mode::Tun);

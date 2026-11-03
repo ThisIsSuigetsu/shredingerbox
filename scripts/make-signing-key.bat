@@ -4,7 +4,7 @@ cd /d "%~dp0.."
 set "KEYDIR=D:\Programming\shredingerbox-keys"
 
 if exist "%KEYDIR%\shredingerbox.key" (
-  echo Ключ уже есть в %KEYDIR% — второй раз не создаю.
+  echo Ключ уже есть в %KEYDIR% - второй раз не создаю.
   pause
   exit /b 0
 )

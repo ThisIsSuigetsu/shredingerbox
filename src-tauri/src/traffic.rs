@@ -75,7 +75,7 @@ struct Connection {
 }
 
 /// Сколько байтов прибавилось у каждого сервера с прошлого опроса.
-/// `last` — что мы видели у каждого соединения в прошлый раз; закрытые соединения из него убираются.
+/// `last` - что мы видели у каждого соединения в прошлый раз; закрытые соединения из него убираются.
 fn deltas(conns: &[Connection], last: &mut HashMap<String, (u64, u64)>) -> HashMap<String, Usage> {
     let mut out: HashMap<String, Usage> = HashMap::new();
     let mut seen = HashMap::with_capacity(conns.len());

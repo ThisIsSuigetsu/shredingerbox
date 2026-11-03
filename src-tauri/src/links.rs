@@ -41,7 +41,7 @@ pub fn parse(link: &str) -> Result<Parsed, String> {
 }
 
 /// Что из буфера обмена стоит предложить добавить: ключи (по строке) или одна ссылка подписки.
-/// Всё остальное — None, чтобы не показывать пользователю его личный буфер.
+/// Всё остальное - None, чтобы не показывать пользователю его личный буфер.
 pub fn clipboard_candidate(text: &str) -> Option<String> {
     let text = text.trim();
     if text.is_empty() || text.len() > 64 * 1024 {
@@ -194,7 +194,7 @@ fn tls_block(parts: &Parts, default_tls: bool) -> Option<Value> {
     Some(Value::Object(tls))
 }
 
-/// Транспорт по параметру type (tcp по умолчанию — без транспорта).
+/// Транспорт по параметру type (tcp по умолчанию - без транспорта).
 fn transport(parts: &Parts) -> Result<Option<Value>, String> {
     let host = q(parts, "host");
     let path = q(parts, "path").unwrap_or("/");

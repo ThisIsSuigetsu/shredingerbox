@@ -39,7 +39,7 @@ fn dedup(mut v: Vec<String>) -> Vec<String> {
     v
 }
 
-/// `servers` — все разобранные серверы как (тег, outbound), `selected_tag` — текущий.
+/// `servers` - все разобранные серверы как (тег, outbound), `selected_tag` - текущий.
 /// Над ними строится селектор `proxy`: через Clash API его можно переключать без перезапуска
 /// ядра и мерить пинг каждого сервера через туннель.
 pub fn build(settings: &Settings, servers: &[(String, Value)], selected_tag: &str, params: &CoreParams) -> Value {
@@ -64,7 +64,7 @@ pub fn build(settings: &Settings, servers: &[(String, Value)], selected_tag: &st
 
     // ВАЖНО: правило с пустым списком в sing-box совпадает со всем подряд,
     // поэтому добавляем правило только если в списке что-то есть.
-    // «Сайты напрямую» — исключения (банки, госуслуги), поэтому они стоят первыми.
+    // «Сайты напрямую» - исключения (банки, госуслуги), поэтому они стоят первыми.
     let mut dns_rules = vec![];
     if !direct_domains.is_empty() {
         dns_rules.push(json!({ "domain_suffix": direct_domains, "server": "dns-local" }));
@@ -112,7 +112,7 @@ pub fn build(settings: &Settings, servers: &[(String, Value)], selected_tag: &st
             "auto_route": true,
             "strict_route": true
         });
-        // На macOS адаптер обязан называться utunN — там имя выбирает само ядро.
+        // На macOS адаптер обязан называться utunN - там имя выбирает само ядро.
         if cfg!(windows) {
             tun["interface_name"] = json!("ShredingerBox");
         }

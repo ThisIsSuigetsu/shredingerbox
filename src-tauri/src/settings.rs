@@ -37,7 +37,7 @@ pub struct Server {
     pub id: String,
     pub name: String,
     pub link: String,
-    /// URL подписки, из которой пришёл сервер (None — добавлен вручную).
+    /// URL подписки, из которой пришёл сервер (None - добавлен вручную).
     #[serde(default)]
     pub subscription: Option<String>,
 }
@@ -52,7 +52,7 @@ pub struct Subscription {
 pub struct AppRule {
     /// Человеческое название («Discord»).
     pub name: String,
-    /// Имя исполняемого файла («Discord.exe») — по нему sing-box и матчит процесс.
+    /// Имя исполняемого файла («Discord.exe») - по нему sing-box и матчит процесс.
     pub exe: String,
 }
 
@@ -63,7 +63,7 @@ pub struct Rules {
     pub proxy_apps: Vec<AppRule>,
     pub direct_apps: Vec<AppRule>,
     pub proxy_domains: Vec<String>,
-    /// Сайты, которые всегда идут напрямую, — даже из приложений «через VPN» и наборов.
+    /// Сайты, которые всегда идут напрямую, - даже из приложений «через VPN» и наборов.
     pub direct_domains: Vec<String>,
     /// Включённые готовые наборы (id из presets.rs).
     pub presets: Vec<String>,
@@ -110,7 +110,7 @@ impl Default for Advanced {
 #[serde(default)]
 pub struct Reminder {
     pub enabled: bool,
-    /// Месяц последнего показа, например «2026-11», — чтобы напоминать раз в месяц.
+    /// Месяц последнего показа, например «2026-11», - чтобы напоминать раз в месяц.
     pub last_shown: Option<String>,
 }
 
@@ -174,7 +174,7 @@ impl Settings {
         std::fs::write(path, json).map_err(|e| e.to_string())
     }
 
-    /// Выбранный сервер, а если выбор потерялся — первый из списка.
+    /// Выбранный сервер, а если выбор потерялся - первый из списка.
     pub fn selected_server(&self) -> Option<&Server> {
         self.selected
             .as_ref()

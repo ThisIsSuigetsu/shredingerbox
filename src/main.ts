@@ -60,7 +60,7 @@ const st = {
   usage: { month: "", servers: {} as Record<string, Usage> },
 };
 
-/** Сколько строк показывать в списках правил — остальное в окне «Показать все». */
+/** Сколько строк показывать в списках правил - остальное в окне «Показать все». */
 const LIST_LIMIT = 10;
 const LIST_TITLE: Record<AppList | SiteList, string> = {
   proxy_apps: "Приложения через VPN",
@@ -70,7 +70,7 @@ const LIST_TITLE: Record<AppList | SiteList, string> = {
 };
 
 const root = document.getElementById("app")!;
-/** Версия из package.json — Vite подставляет её при сборке. */
+/** Версия из package.json - Vite подставляет её при сборке. */
 declare const __APP_VERSION__: string;
 const APP_VERSION = typeof __APP_VERSION__ === "string" ? __APP_VERSION__ : "dev";
 let toastTimer = 0;
@@ -111,7 +111,7 @@ function splitFlag(name: string): { code: string; name: string } {
 function pingView(id: string): string {
   const p = st.pings[id];
   if (!p) return "";
-  if (p.udp) return `<span class="ping muted" title="Hysteria2 работает по UDP — TCP-пинг не меряется">UDP</span>`;
+  if (p.udp) return `<span class="ping muted" title="Hysteria2 работает по UDP - TCP-пинг не меряется">UDP</span>`;
   if (p.ms == null) return `<span class="ping" style="color:var(--danger)">нет ответа</span>`;
   const good = p.via_vpn ? 300 : 120;
   const color = p.ms <= good ? "var(--accent)" : p.ms <= good * 2.5 ? "var(--amber)" : "var(--danger)";
@@ -231,7 +231,7 @@ function statsText(x: { add: string[]; dup: number }): string {
 // ---------- обновления ----------
 
 interface UpdateInfo { version: string; current: string; notes: string | null }
-/** Версия, от которой пользователь отказался «Позже», — до перезапуска больше не предлагаем. */
+/** Версия, от которой пользователь отказался «Позже», - до перезапуска больше не предлагаем. */
 let updateSnoozed = "";
 
 async function checkUpdate(manual = false) {
@@ -250,7 +250,7 @@ async function checkUpdate(manual = false) {
 
 // ---------- буфер обмена ----------
 
-/** Текст из буфера, который пользователь уже отклонил, — второй раз не предлагаем. */
+/** Текст из буфера, который пользователь уже отклонил, - второй раз не предлагаем. */
 let clipboardDismissed = "";
 let clipboardChecking = false;
 
@@ -263,11 +263,11 @@ async function checkClipboard() {
       st.modal = { kind: "clipboard", text, busy: false, error: "" };
       render();
     }
-  } catch { /* буфер недоступен — молча пропускаем */ }
+  } catch { /* буфер недоступен - молча пропускаем */ }
   clipboardChecking = false;
 }
 
-/** «2 ключа» / «подписка с panel.example.org» — коротко, без самих секретов. */
+/** «2 ключа» / «подписка с panel.example.org» - коротко, без самих секретов. */
 function clipboardSummary(text: string): string {
   if (/^https?:\/\//i.test(text)) {
     try { return `подписка с <span class="mono">${esc(new URL(text).host)}</span>`; } catch { return "подписка"; }
@@ -300,7 +300,7 @@ async function saveSettings(change: (s: Settings) => void, okText?: string) {
   render();
 }
 
-/** После ошибки ядро могло остановиться — берём настоящее состояние у Rust. */
+/** После ошибки ядро могло остановиться - берём настоящее состояние у Rust. */
 async function refreshStatus() {
   try { st.status = await invoke<Status>("get_status"); } catch { return; }
   if (!st.status.running) stopTraffic();
@@ -350,7 +350,7 @@ async function refreshUsage() {
   });
 }
 
-/** Трей и панель задач Rust обновляет сам, а тут — на всякий случай, по настоящему состоянию ядра. */
+/** Трей и панель задач Rust обновляет сам, а тут - на всякий случай, по настоящему состоянию ядра. */
 function syncIndicators() {
   invoke("sync_indicators").catch(() => {});
 }
@@ -375,7 +375,7 @@ function startTraffic(attempt = 0) {
     } catch { /* пропускаем битые сообщения */ }
   };
   ws.onerror = () => {
-    // Ядро могло ещё не поднять API — пробуем пару раз.
+    // Ядро могло ещё не поднять API - пробуем пару раз.
     if (attempt < 5 && st.status?.running) setTimeout(() => startTraffic(attempt + 1), 700);
   };
 }
@@ -522,7 +522,7 @@ function serversView(): string {
     : "";
   return `<div class="page-head">
       <div><h1>Серверы</h1><p>Подписки и ключи. Пока VPN включён, пинг каждого сервера меряется через туннель, а переключение мгновенное.
-        Рядом с сервером — расход трафика за ${monthName(st.usage.month || "0000-00")}, наведи, чтобы увидеть загрузку и отдачу.</p></div>
+        Рядом с сервером - расход трафика за ${monthName(st.usage.month || "0000-00")}, наведи, чтобы увидеть загрузку и отдачу.</p></div>
       <div style="display:flex;gap:8px">
         ${s.servers.length ? `<button class="btn-ghost" data-action="ping">Проверить пинг</button>` : ""}
         <button class="btn-light" data-action="open-add-server">Добавить</button>
@@ -594,10 +594,10 @@ function rulesView(): string {
         <button class="dashed" style="margin-top:6px" data-action="open-add-sites">${icon.plus}Добавить сайты</button>
         ${tab === "proxy_domains"
           ? `<div class="sep" style="margin:12px 0"></div>
-            <span class="muted" style="font-size:12px;padding-bottom:8px">Готовые наборы — нажми, чтобы включить</span>
+            <span class="muted" style="font-size:12px;padding-bottom:8px">Готовые наборы - нажми, чтобы включить</span>
             <div class="chips">${presets}</div>`
-          : `<div class="hint" style="margin-top:12px">${icon.info}<span>Эти сайты всегда идут напрямую — даже из приложений «через VPN» и готовых наборов. Удобно для банков и госуслуг.</span></div>`}
-        <div class="hint" style="margin-top:12px">${icon.info}<span>В режиме «Прокси» правила для приложений работают только у программ, которые используют системный прокси. В режиме TUN — у всех.</span></div>
+          : `<div class="hint" style="margin-top:12px">${icon.info}<span>Эти сайты всегда идут напрямую - даже из приложений «через VPN» и готовых наборов. Удобно для банков и госуслуг.</span></div>`}
+        <div class="hint" style="margin-top:12px">${icon.info}<span>В режиме «Прокси» правила для приложений работают только у программ, которые используют системный прокси. В режиме TUN - у всех.</span></div>
       </section></div>
     </div>`;
 }
@@ -613,14 +613,14 @@ function settingsView(): string {
     `<button class="switch ${on ? "on" : ""}" role="switch" aria-checked="${on}" aria-label="${label}" data-action="${action}" ${busy ? "disabled" : ""}><span></span></button>`;
   const windows = st.status?.windows ?? true;
   const behaviour = `<section class="card" style="gap:0;padding:6px 16px">
-      ${windows ? `<div class="set-row"><div class="t"><b>Запускать вместе с Windows</b><span>Сразу с правами администратора — TUN без окна UAC</span></div>
+      ${windows ? `<div class="set-row"><div class="t"><b>Запускать вместе с Windows</b><span>Сразу с правами администратора - TUN без окна UAC</span></div>
         ${sw(st.autostart, "toggle-autostart", "Запускать вместе с Windows", st.autostartBusy)}</div>
       <div class="set-row"><div class="t"><b>Подключаться при автозапуске</b><span>Клиент стартует в трее и сразу включает VPN</span></div>
         ${sw(g.autoconnect, "toggle-autoconnect", "Подключаться при автозапуске")}</div>` : ""}
       <div class="set-row"><div class="t"><b>Проверять обновления</b><span>Версия ${esc(APP_VERSION)} · новые версии приходят с GitHub</span></div>
         <button class="btn-ghost" data-action="check-update-now" style="height:36px">Проверить</button>
         ${sw(g.check_updates, "toggle-updates", "Проверять обновления")}</div>
-      <div class="set-row"><div class="t"><b>Предлагать ключи из буфера обмена</b><span>Скопировал ключ или подписку — открыл клиент — он предложит добавить</span></div>
+      <div class="set-row"><div class="t"><b>Предлагать ключи из буфера обмена</b><span>Скопировал ключ или подписку - открыл клиент - он предложит добавить</span></div>
         ${sw(g.clipboard_offer, "toggle-clipboard", "Предлагать ключи из буфера обмена")}</div>
       <div class="set-row"><div class="t"><b>Сворачивать в трей при закрытии</b><span>Крестик прячет окно, VPN продолжает работать</span></div>
         ${sw(g.close_to_tray, "toggle-tray", "Сворачивать в трей при закрытии")}</div>
@@ -630,7 +630,7 @@ function settingsView(): string {
         ${st.status?.elevated ? `<span style="color:var(--accent);font-size:13px;font-weight:600">Есть</span>` : `<button class="btn-ghost" data-action="restart-admin">Перезапустить с правами</button>`}</div>` : ""}
       <div class="set-row"><div class="t"><b>Папка данных</b><span>Настройки, конфиг и кэш ядра</span></div>
         <button class="btn-ghost" data-action="open-data-dir">Открыть</button></div>
-      <div class="set-row"><div class="t"><b>Напоминание о продлении подписки</b><span>Каждое 20-е число — написать Suigetsu в Telegram</span></div>
+      <div class="set-row"><div class="t"><b>Напоминание о продлении подписки</b><span>Каждое 20-е число - написать Suigetsu в Telegram</span></div>
         <button class="switch ${st.settings!.reminder.enabled ? "on" : ""}" role="switch" aria-checked="${st.settings!.reminder.enabled}" aria-label="Напоминание о продлении подписки" data-action="toggle-reminder"><span></span></button></div>
     </section>`;
   if (!a.enabled) return `<div class="settings">${head}${basic}</div>`;
@@ -756,14 +756,14 @@ function modalView(): string {
     body = `<div class="modal" role="dialog" aria-label="Пора продлить подписку">${head("Пора продлить подписку")}
       <div class="modal-body" style="flex-direction:row;align-items:center;gap:16px">
         <div style="flex-shrink:0">${mascot(72, mood())}</div>
-        <p style="margin:0;line-height:1.55">Сегодня 20-е — напиши <b>Suigetsu</b> в Telegram, чтобы продлить подписку на VPN.</p>
+        <p style="margin:0;line-height:1.55">Сегодня 20-е - напиши <b>Suigetsu</b> в Telegram, чтобы продлить подписку на VPN.</p>
       </div>
       <div class="modal-foot"><button class="btn-ghost" data-action="reminder-disable">Больше не напоминать</button><span class="grow"></span>
         <button class="btn-accent" data-action="close-modal">Понятно</button></div></div>`;
   } else if (m.kind === "admin") {
     body = `<div class="modal" role="dialog" aria-label="Нужны права администратора">${head("Нужны права администратора")}
       <div class="modal-body"><p style="margin:0;line-height:1.55">Режим TUN перехватывает весь трафик системы, поэтому Windows требует права администратора. ShredingerBox перезапустится и сразу подключится.</p>
-      <p class="muted" style="margin:0;font-size:13px">Или переключись на режим «Прокси» — ему права не нужны.</p></div>
+      <p class="muted" style="margin:0;font-size:13px">Или переключись на режим «Прокси» - ему права не нужны.</p></div>
       <div class="modal-foot"><button class="btn-ghost" data-action="use-proxy-mode">Включить «Прокси»</button><span class="grow"></span>
         <button class="btn-accent" data-action="restart-admin">Перезапустить</button></div></div>`;
   } else if (m.kind === "text") {
@@ -991,7 +991,7 @@ async function onAction(action: string, el: HTMLElement, ev: Event) {
         st.settings = await invoke<Settings>("add_from_text", { text: m.text });
         clipboardDismissed = m.text;
         st.modal = null;
-        toast("Добавлено — можно подключаться");
+        toast("Добавлено - можно подключаться");
         pingAll();
       } catch (e) {
         if (st.modal?.kind === "clipboard") { st.modal.busy = false; st.modal.error = errText(e); }
@@ -1002,7 +1002,7 @@ async function onAction(action: string, el: HTMLElement, ev: Event) {
     case "reminder-disable":
       st.modal = null;
       await saveSettings((x) => { x.reminder.enabled = false; });
-      return toast("Напоминание выключено — включить можно в настройках");
+      return toast("Напоминание выключено - включить можно в настройках");
     case "close-modal": st.modal = null; return render();
     case "overlay": if (ev.target === el) { st.modal = null; render(); } return;
   }
@@ -1116,7 +1116,7 @@ async function init() {
     if (st.status) st.status.running = false;
     syncIndicators();
     const last = e.payload.last || "";
-    // Частая ошибка Windows при быстром перезапуске TUN — просто пробуем ещё раз.
+    // Частая ошибка Windows при быстром перезапуске TUN - просто пробуем ещё раз.
     if (/configure tun interface/i.test(last) && tunRetries < 2 && Date.now() - st.connectedAt < 60000) {
       tunRetries++;
       st.busy = true;

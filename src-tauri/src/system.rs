@@ -1,6 +1,6 @@
 //! Системные вещи Windows: права администратора, системный прокси,
-//! список запущенных программ, открытие папки. На macOS — системный прокси через
-//! networksetup, остальное — заглушки.
+//! список запущенных программ, открытие папки. На macOS - системный прокси через
+//! networksetup, остальное - заглушки.
 
 use serde::Serialize;
 
@@ -47,7 +47,7 @@ mod win {
         }
     }
 
-    /// Запустить программу с запросом UAC. true — пользователь согласился.
+    /// Запустить программу с запросом UAC. true - пользователь согласился.
     pub fn run_elevated(exe: &std::path::Path, args: &str) -> bool {
         let op = wide(std::ffi::OsStr::new("runas"));
         let file = wide(exe.as_os_str());
@@ -65,7 +65,7 @@ mod mac {
 
     const NETWORKSETUP: &str = "/usr/sbin/networksetup";
 
-    /// Включённые сетевые службы («Wi-Fi», «Ethernet»). Первая строка вывода — пояснение,
+    /// Включённые сетевые службы («Wi-Fi», «Ethernet»). Первая строка вывода - пояснение,
     /// выключенные службы помечены «*».
     fn services() -> Vec<String> {
         let Ok(out) = Command::new(NETWORKSETUP).arg("-listallnetworkservices").output() else {
@@ -212,7 +212,7 @@ pub fn restart_as_admin() -> Result<bool, String> {
     }
 }
 
-/// Программы, у которых есть окно — их пользователь и узнает в списке.
+/// Программы, у которых есть окно - их пользователь и узнает в списке.
 pub fn list_processes() -> Vec<ProcInfo> {
     #[cfg(windows)]
     {
@@ -267,7 +267,7 @@ pub fn list_processes() -> Vec<ProcInfo> {
     }
 }
 
-/// В 0.4-dev клиент регистрировал схему shredingerbox:// — убираем её из реестра.
+/// В 0.4-dev клиент регистрировал схему shredingerbox:// - убираем её из реестра.
 pub fn remove_legacy_url_scheme() {
     #[cfg(windows)]
     {
@@ -303,7 +303,7 @@ mod single {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    /// true — мы единственная копия (мьютекс остаётся открытым до выхода из программы).
+    /// true - мы единственная копия (мьютекс остаётся открытым до выхода из программы).
     pub fn try_acquire() -> bool {
         let name = wide("Local\\ShredingerBox-single-instance");
         unsafe {
@@ -334,7 +334,7 @@ mod single {
     }
 }
 
-/// Занять «место» единственной копии. `wait_ms` > 0 — подождать, пока старая копия
+/// Занять «место» единственной копии. `wait_ms` > 0 - подождать, пока старая копия
 /// закроется (нужно при перезапуске с правами и при автозапуске).
 pub fn acquire_single_instance(wait_ms: u64) -> bool {
     #[cfg(windows)]
@@ -470,7 +470,7 @@ pub fn set_autostart(enable: bool, data_dir: &std::path::Path) -> Result<bool, S
             if !win::run_elevated(std::path::Path::new("schtasks.exe"), &params) {
                 return Err("Права администратора не выданы".into());
             }
-            // Задача создаётся в отдельном процессе — ждём, пока она появится или исчезнет.
+            // Задача создаётся в отдельном процессе - ждём, пока она появится или исчезнет.
             for _ in 0..40 {
                 if autostart_enabled() == enable {
                     break;
@@ -487,7 +487,7 @@ pub fn set_autostart(enable: bool, data_dir: &std::path::Path) -> Result<bool, S
     }
 }
 
-/// Перезапуск с правами через задачу автозапуска — без окна UAC.
+/// Перезапуск с правами через задачу автозапуска - без окна UAC.
 pub fn run_autostart_task() -> bool {
     #[cfg(windows)]
     {

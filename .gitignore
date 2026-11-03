@@ -4,6 +4,6 @@ src-tauri/target/
 src-tauri/gen/
 src-tauri/binaries/*.exe
 src-tauri/binaries/sing-box-*
-# ключ подписи обновлений — НИКОГДА не в репозиторий
+# ключ подписи обновлений - НИКОГДА не в репозиторий
 *.key
 *.key.pub

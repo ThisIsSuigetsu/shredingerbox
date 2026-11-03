@@ -48,7 +48,7 @@ struct UpdateInfo {
     notes: Option<String>,
 }
 
-/// Пункт меню трея «Подключиться / Отключиться» — его текст меняется.
+/// Пункт меню трея «Подключиться / Отключиться» - его текст меняется.
 struct TrayItems {
     toggle: MenuItem<Wry>,
 }
@@ -104,7 +104,7 @@ struct FullState {
 struct Ping {
     id: String,
     ms: Option<u64>,
-    /// UDP-протокол (Hysteria2) — TCP-пинг не меряется.
+    /// UDP-протокол (Hysteria2) - TCP-пинг не меряется.
     udp: bool,
     /// Задержка измерена через само ядро (реальный запрос через VPN).
     via_vpn: bool,
@@ -187,7 +187,7 @@ async fn fetch_subscription(url: &str) -> Result<Vec<String>, String> {
 }
 
 /// Заменить серверы одной подписки свежим списком.
-/// Сервер с тем же ключом сохраняет id — на нём держится счётчик трафика за месяц.
+/// Сервер с тем же ключом сохраняет id - на нём держится счётчик трафика за месяц.
 fn merge_subscription(s: &mut Settings, url: &str, links_list: Vec<String>) {
     let old_selected_link = s.selected_server().map(|srv| srv.link.clone());
     let mut old_ids: std::collections::HashMap<String, String> = s
@@ -231,7 +231,7 @@ fn get_state(state: State<AppState>) -> FullState {
 #[tauri::command]
 async fn save_settings(app: AppHandle, state: State<'_, AppState>, settings: Settings) -> Result<Status, String> {
     state.store(settings)?;
-    // Перезапуск сначала гасит ядро — если он не удался, VPN уже выключен.
+    // Перезапуск сначала гасит ядро - если он не удался, VPN уже выключен.
     let restarted = restart_if_running(&app, &state).await;
     update_indicators(&app);
     restarted?;
@@ -329,7 +329,7 @@ fn get_traffic(state: State<AppState>) -> MonthTraffic {
 }
 
 /// Пинг серверов. Пока VPN включён, каждый сервер проверяется реальным запросом
-/// через ядро (Hysteria2 тоже); без VPN — TCP-подключением (у Hysteria2 это UDP — не меряем).
+/// через ядро (Hysteria2 тоже); без VPN - TCP-подключением (у Hysteria2 это UDP - не меряем).
 #[tauri::command]
 async fn ping_servers(state: State<'_, AppState>) -> Result<Vec<Ping>, String> {
     let snapshot = state.snapshot();
@@ -376,7 +376,7 @@ async fn ping_servers(state: State<'_, AppState>) -> Result<Vec<Ping>, String> {
     Ok(result)
 }
 
-/// Выбрать сервер. Если VPN включён — переключаем прямо в ядре, без перезапуска и пересоздания TUN.
+/// Выбрать сервер. Если VPN включён - переключаем прямо в ядре, без перезапуска и пересоздания TUN.
 #[tauri::command]
 async fn select_server(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<Status, String> {
     let mut s = state.snapshot();
@@ -388,7 +388,7 @@ async fn select_server(app: AppHandle, state: State<'_, AppState>, id: String) -
     if state.core.is_running()
         && !clash_select(state.core.api_port, &state.core.secret, &core::server_tag(&id)).await
     {
-        // Сервера нет в запущенном конфиге (добавлен после подключения) — перезапускаем.
+        // Сервера нет в запущенном конфиге (добавлен после подключения) - перезапускаем.
         let restarted = restart_if_running(&app, &state).await;
         update_indicators(&app);
         restarted?;
@@ -429,8 +429,8 @@ fn open_data_dir(state: State<AppState>) -> Result<(), String> {
     system::open_folder(&state.data_dir)
 }
 
-/// Перезапуск с правами администратора. Если включён автозапуск — через его задачу,
-/// без окна UAC; иначе — обычный запрос UAC.
+/// Перезапуск с правами администратора. Если включён автозапуск - через его задачу,
+/// без окна UAC; иначе - обычный запрос UAC.
 #[tauri::command]
 fn restart_as_admin(app: AppHandle, state: State<AppState>) -> Result<(), String> {
     if system::autostart_enabled() {
@@ -455,7 +455,7 @@ fn startup_flags(state: State<AppState>) -> Launch {
     state.launch.clone()
 }
 
-/// Ключ или ссылка подписки из буфера обмена — только если там именно это
+/// Ключ или ссылка подписки из буфера обмена - только если там именно это
 /// и этого ещё нет в клиенте. Остальное содержимое буфера в интерфейс не попадает.
 #[tauri::command]
 fn clipboard_candidate(app: AppHandle, state: State<AppState>) -> Option<String> {
@@ -528,7 +528,7 @@ fn get_autostart() -> bool {
 #[tauri::command]
 async fn set_autostart(state: State<'_, AppState>, enabled: bool) -> Result<bool, String> {
     let dir = state.data_dir.clone();
-    // schtasks и ожидание UAC — блокирующие, уводим их с потока интерфейса
+    // schtasks и ожидание UAC - блокирующие, уводим их с потока интерфейса
     tauri::async_runtime::spawn_blocking(move || system::set_autostart(enabled, &dir))
         .await
         .map_err(|e| e.to_string())?
@@ -536,13 +536,13 @@ async fn set_autostart(state: State<'_, AppState>, enabled: bool) -> Result<bool
 
 const TRAY_OFF: &[u8] = include_bytes!("../icons/tray-off.png");
 const TRAY_ON: &[u8] = include_bytes!("../icons/tray-on.png");
-// Иконка окна: маскот спит или выглядывает (рисунки — icons/state-*.svg).
+// Иконка окна: маскот спит или выглядывает (рисунки - icons/state-*.svg).
 const WINDOW_OFF: &[u8] = include_bytes!("../icons/state-sleep.png");
 const WINDOW_ON: &[u8] = include_bytes!("../icons/state-peek.png");
-// Мятная точка поверх кнопки на панели задач — видна, даже если ярлык закреплён.
+// Мятная точка поверх кнопки на панели задач - видна, даже если ярлык закреплён.
 const OVERLAY_ON: &[u8] = include_bytes!("../icons/overlay-on.png");
 
-/// Трей, меню трея и панель задач — по тому, работает ли ядро на самом деле.
+/// Трей, меню трея и панель задач - по тому, работает ли ядро на самом деле.
 /// Вызывается после каждого подключения, отключения, перезапуска и падения ядра.
 pub(crate) fn update_indicators(app: &AppHandle) {
     let connected = app
@@ -555,9 +555,9 @@ pub(crate) fn update_indicators(app: &AppHandle) {
             let _ = tray.set_icon(Some(icon));
         }
         let _ = tray.set_tooltip(Some(if connected {
-            "ShredingerBox — подключено"
+            "ShredingerBox - подключено"
         } else {
-            "ShredingerBox — отключено"
+            "ShredingerBox - отключено"
         }));
     }
     if let Some(items) = app.try_state::<TrayItems>() {
@@ -587,12 +587,12 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     let menu = Menu::with_items(app, &[&show, &toggle, &separator, &quit])?;
 
     let mut builder = TrayIconBuilder::with_id("main")
-        .tooltip("ShredingerBox — отключено")
+        .tooltip("ShredingerBox - отключено")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_main(app),
-            // Подключение живёт в интерфейсе — просим его нажать «кнопку».
+            // Подключение живёт в интерфейсе - просим его нажать «кнопку».
             "toggle" => {
                 let _ = app.emit("tray-toggle", ());
             }
@@ -627,7 +627,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Только одна копия. При автозапуске и перезапуске с правами старая копия ещё
-    // закрывается — ждём её до 8 секунд. При обычном повторном запуске просто
+    // закрывается - ждём её до 8 секунд. При обычном повторном запуске просто
     // показываем окно уже работающей копии.
     let relaunch = std::env::args().any(|a| a == "--autostart" || a == "--autoconnect");
     if !system::acquire_single_instance(if relaunch { 8000 } else { 0 }) {
@@ -677,7 +677,7 @@ pub fn run() {
             update_indicators(app.handle());
 
             if let Some(window) = app.get_webview_window("main") {
-                // Из автозапуска стартуем тихо — сразу в трей.
+                // Из автозапуска стартуем тихо - сразу в трей.
                 if autostart {
                     let _ = window.hide();
                 }
