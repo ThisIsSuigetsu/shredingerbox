@@ -1,0 +1,37 @@
+[package]
+name = "shredingerbox"
+version = "0.5.0"
+description = "ShredingerBox — простой VPN-клиент на sing-box"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[lib]
+name = "shredingerbox_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-updater = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+percent-encoding = "2"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tokio = { version = "1", features = ["net", "time"] }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+is_elevated = "0.1"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

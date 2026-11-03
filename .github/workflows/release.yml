@@ -1,0 +1,67 @@
+# Выпуск ShredingerBox: при отправке метки вида v0.5.0 собирает Windows и macOS,
+# подписывает обновления и публикует релиз с latest.json для автообновления.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: "--config src-tauri/tauri.ci.conf.json"
+          - platform: macos-latest
+            args: "--config src-tauri/tauri.ci.conf.json --target aarch64-apple-darwin --bundles app,dmg"
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Ядро sing-box (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/get-sing-box.ps1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Ядро sing-box (macOS)
+        if: runner.os == 'macOS'
+        run: bash scripts/get-sing-box.sh darwin-arm64 aarch64-apple-darwin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Зависимости npm
+        run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "ShredingerBox ${{ github.ref_name }}"
+          releaseBody: "Обновление ShredingerBox ${{ github.ref_name }}. Установленный клиент предложит обновиться сам."
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}
