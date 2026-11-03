@@ -499,7 +499,8 @@ pub fn run_autostart_task() -> bool {
     }
 }
 
-pub fn open_folder(path: &std::path::Path) -> Result<(), String> {
+/// Открыть папку в проводнике или ссылку в браузере.
+pub fn open_folder(path: impl AsRef<std::ffi::OsStr>) -> Result<(), String> {
     #[cfg(windows)]
     let program = "explorer";
     #[cfg(target_os = "macos")]
@@ -507,7 +508,7 @@ pub fn open_folder(path: &std::path::Path) -> Result<(), String> {
     #[cfg(all(not(windows), not(target_os = "macos")))]
     let program = "xdg-open";
     std::process::Command::new(program)
-        .arg(path)
+        .arg(path.as_ref())
         .spawn()
         .map(|_| ())
         .map_err(|e| e.to_string())

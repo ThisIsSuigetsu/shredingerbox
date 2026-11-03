@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import { mascot, type Mood } from "./mascot";
+import { inline, parseItems, releasesBetween, type Release } from "./changelog";
 
 // ---------- типы (зеркало Rust-структур) ----------
 
@@ -19,8 +20,9 @@ interface Settings {
   advanced: { enabled: boolean; mixed_port: number; allow_lan: boolean; log_level: string; remote_dns: string };
   reminder: { enabled: boolean; last_shown: string | null };
   general: { autoconnect: boolean; close_to_tray: boolean; clipboard_offer: boolean; check_updates: boolean };
+  seen_version: string | null;
 }
-interface Status { running: boolean; mode: Mode; server: string | null; api_port: number; secret: string; elevated: boolean; windows: boolean }
+interface Status { running: boolean; mode: Mode; server: string | null; api_port: number; secret: string; elevated: boolean; windows: boolean; portable: boolean }
 interface Preset { id: string; title: string; domains: string[] }
 interface Ping { id: string; ms: number | null; udp: boolean; via_vpn: boolean }
 interface Proc { name: string; exe: string }
@@ -37,6 +39,7 @@ type Modal =
   | { kind: "reminder" }
   | { kind: "clipboard"; text: string; busy: boolean; error: string }
   | { kind: "update"; version: string; current: string; notes: string; busy: boolean; progress: number; error: string }
+  | { kind: "whatsnew"; releases: Release[] }
   | { kind: "text"; title: string; text: string; live: boolean };
 
 // ---------- состояние ----------
@@ -335,6 +338,18 @@ async function toggleConnect() {
   if (st.status?.running) setTimeout(pingAll, 1500);
 }
 
+/** После обновления один раз показывает «Что нового». На свежей установке (серверов ещё нет) - молчит. */
+async function showWhatsNew() {
+  const s = st.settings!;
+  if (APP_VERSION === "dev" || s.seen_version === APP_VERSION) return;
+  // До 0.6.1 версия не запоминалась - старому пользователю показываем только текущую.
+  const releases = s.seen_version
+    ? releasesBetween(s.seen_version, APP_VERSION)
+    : s.servers.length ? releasesBetween("0", APP_VERSION).slice(0, 1) : [];
+  await saveSettings((x) => { x.seen_version = APP_VERSION; });
+  if (releases.length && !st.modal) { st.modal = { kind: "whatsnew", releases }; render(); }
+}
+
 /** Берёт у Rust расход за месяц и обновляет цифры на месте, без полной перерисовки. */
 async function refreshUsage() {
   try { st.usage = await invoke<typeof st.usage>("get_traffic"); } catch { return; }
@@ -617,7 +632,7 @@ function settingsView(): string {
         ${sw(st.autostart, "toggle-autostart", "Запускать вместе с Windows", st.autostartBusy)}</div>
       <div class="set-row"><div class="t"><b>Подключаться при автозапуске</b><span>Клиент стартует в трее и сразу включает VPN</span></div>
         ${sw(g.autoconnect, "toggle-autoconnect", "Подключаться при автозапуске")}</div>` : ""}
-      <div class="set-row"><div class="t"><b>Проверять обновления</b><span>Версия ${esc(APP_VERSION)} · новые версии приходят с GitHub</span></div>
+      <div class="set-row"><div class="t"><b>Проверять обновления</b><span>Версия ${esc(APP_VERSION)}${st.status?.portable ? " · portable" : ""} · новые версии приходят с GitHub</span></div>
         <button class="btn-ghost" data-action="check-update-now" style="height:36px">Проверить</button>
         ${sw(g.check_updates, "toggle-updates", "Проверять обновления")}</div>
       <div class="set-row"><div class="t"><b>Предлагать ключи из буфера обмена</b><span>Скопировал ключ или подписку - открыл клиент - он предложит добавить</span></div>
@@ -735,15 +750,26 @@ function modalView(): string {
         <div id="full-list" style="display:flex;flex-direction:column;max-height:52vh;overflow:auto">${ruleRows(m.list, m.filter)}</div>
       </div></div>`;
   } else if (m.kind === "update") {
+    const portable = !!st.status?.portable;
+    const notes = parseItems(m.notes);
     body = `<div class="modal" role="dialog" aria-label="Доступно обновление">${head(`Доступна версия ${esc(m.version)}`)}
       <div class="modal-body">
-        <p class="muted" style="margin:0;font-size:13px">Сейчас установлена ${esc(m.current)}. Во время обновления VPN ненадолго отключится, потом клиент перезапустится сам.</p>
-        ${m.notes ? `<pre class="code" style="max-height:200px">${esc(m.notes)}</pre>` : ""}
+        <p class="muted" style="margin:0;font-size:13px">Сейчас установлена ${esc(m.current)}. ${portable
+          ? "Это portable-версия: откроется страница загрузки - скачай zip и распакуй поверх папки с программой, папка data останется."
+          : "Во время обновления VPN ненадолго отключится, потом клиент перезапустится сам."}</p>
+        ${notes.length ? `<b style="font-size:13px">Что нового</b><ul class="news">${notes.map((n) => `<li>${inline(n, esc)}</li>`).join("")}</ul>` : ""}
         ${m.busy ? `<div style="height:6px;border-radius:3px;background:var(--chip);overflow:hidden"><div id="upd-bar" style="height:100%;width:${m.progress}%;background:var(--accent)"></div></div>` : ""}
         ${m.error ? `<div class="hint" style="color:var(--danger)">${esc(m.error)}</div>` : ""}
       </div>
       <div class="modal-foot"><button class="btn-ghost" data-action="snooze-update" ${m.busy ? "disabled" : ""}>Позже</button><span class="grow"></span>
-        <button class="btn-accent" data-action="install-update" ${m.busy ? "disabled" : ""}>${m.busy ? "Обновляю…" : "Обновить"}</button></div></div>`;
+        <button class="btn-accent" data-action="install-update" ${m.busy ? "disabled" : ""}>${m.busy ? "Обновляю…" : portable ? "Скачать" : "Обновить"}</button></div></div>`;
+  } else if (m.kind === "whatsnew") {
+    const sections = m.releases.map((r) => `<div style="display:flex;flex-direction:column;gap:6px">
+        ${m.releases.length > 1 ? `<b style="font-size:13px">Версия ${esc(r.version)}</b>` : ""}
+        <ul class="news">${r.items.map((n) => `<li>${inline(n, esc)}</li>`).join("")}</ul></div>`).join("");
+    body = `<div class="modal" role="dialog" aria-label="Что нового">${head(`Что нового в ${esc(APP_VERSION)}`)}
+      <div class="modal-body" style="max-height:60vh">${sections}</div>
+      <div class="modal-foot"><span class="grow"></span><button class="btn-accent" data-action="close-modal">Понятно</button></div></div>`;
   } else if (m.kind === "clipboard") {
     body = `<div class="modal" role="dialog" aria-label="Добавить из буфера обмена">${head("Добавить из буфера обмена?")}
       <div class="modal-body">
@@ -972,6 +998,7 @@ async function onAction(action: string, el: HTMLElement, ev: Event) {
       m.busy = true; m.error = ""; render();
       try {
         await invoke("install_update"); // при успехе клиент перезапустится сам
+        if (st.status?.portable) { st.modal = null; render(); toast("Скачай zip и распакуй поверх папки с программой"); }
       } catch (e) {
         if (st.modal?.kind === "update") { st.modal.busy = false; st.modal.error = errText(e); }
         render();
@@ -1141,6 +1168,7 @@ async function init() {
   st.autostart = await invoke<boolean>("get_autostart").catch(() => false);
   syncIndicators();
   render();
+  await showWhatsNew();
   const flags: { autostart: boolean; autoconnect: boolean } = await invoke("startup_flags");
   // Буфер проверяем при запуске и каждый раз, когда окно получает фокус.
   if (!flags.autostart) checkClipboard();

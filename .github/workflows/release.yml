@@ -53,6 +53,15 @@ jobs:
       - name: Зависимости npm
         run: npm ci
 
+      # Раздел этой версии из CHANGELOG.md - его видно в окне «Доступна версия» и на GitHub.
+      - name: Описание релиза
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          notes=$(tr -d '\r' < CHANGELOG.md | awk -v v="## $version" '$0==v{f=1;next} /^## /{f=0} f' | sed '/./,$!d')
+          [ -n "$notes" ] || notes="Обновление ShredingerBox ${GITHUB_REF_NAME}."
+          { echo "RELEASE_NOTES<<EOF_NOTES"; echo "$notes"; echo "EOF_NOTES"; } >> "$GITHUB_ENV"
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -61,7 +70,14 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "ShredingerBox ${{ github.ref_name }}"
-          releaseBody: "Обновление ShredingerBox ${{ github.ref_name }}. Установленный клиент предложит обновиться сам."
+          releaseBody: ${{ env.RELEASE_NOTES }}
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+      - name: Portable-версия (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/make-portable.ps1 "${{ github.ref_name }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

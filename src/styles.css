@@ -137,6 +137,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .server.on { background: var(--raised); }
 .server .name { flex-grow: 1; min-width: 0; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .server .ping { font-size: 13px; font-weight: 600; }
+.news { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; line-height: 1.5; }
+.news .mono { font-size: 12px; }
 .usage { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .link-btn.more { align-self: flex-start; height: 36px; padding: 0 2px; margin-top: 2px; }
 .server .del { width: 30px; height: 30px; border-radius: 8px; display: flex; align-items: center; justify-content: center; color: var(--muted); opacity: 0; }

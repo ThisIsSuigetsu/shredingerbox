@@ -31,6 +31,17 @@ pub struct AppState {
     pub update: Mutex<Option<tauri_plugin_updater::Update>>,
     /// Расход трафика по серверам за каждый месяц.
     pub traffic: traffic::Traffic,
+    /// Portable-версия: данные рядом с программой, обновление - скачать новый zip.
+    pub portable: bool,
+}
+
+const RELEASES_URL: &str = "https://github.com/ThisIsSuigetsu/shredingerbox/releases/latest";
+
+/// Рядом с exe лежит portable.txt - значит, это portable-версия, и все данные
+/// хранятся в папке data рядом с программой, а не в %APPDATA%.
+fn portable_data_dir() -> Option<PathBuf> {
+    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    dir.join("portable.txt").exists().then(|| dir.join("data"))
 }
 
 #[derive(Serialize)]
@@ -77,6 +88,7 @@ impl AppState {
             secret: self.core.secret.clone(),
             elevated: system::is_elevated(),
             windows: cfg!(windows),
+            portable: self.portable,
         }
     }
 }
@@ -91,6 +103,7 @@ struct Status {
     elevated: bool,
     /// TUN, права администратора и автозапуск пока есть только в Windows.
     windows: bool,
+    portable: bool,
 }
 
 #[derive(Serialize)]
@@ -495,6 +508,10 @@ async fn check_update(app: AppHandle, state: State<'_, AppState>) -> Result<Opti
 /// установщик заменяет и sing-box.exe, а запущенный файл заменить нельзя.
 #[tauri::command]
 async fn install_update(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    // Установщик поставил бы обычную версию в другую папку - portable обновляют новым zip.
+    if state.portable {
+        return system::open_folder(RELEASES_URL);
+    }
     let update = state
         .update
         .lock()
@@ -643,10 +660,10 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
-            let data_dir = app
-                .path()
-                .app_data_dir()
-                .unwrap_or_else(|_| PathBuf::from("."));
+            let portable = portable_data_dir();
+            let data_dir = portable.clone().unwrap_or_else(|| {
+                app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("."))
+            });
             std::fs::create_dir_all(&data_dir).ok();
             let settings = Settings::load(&data_dir.join("settings.json"));
 
@@ -670,6 +687,7 @@ pub fn run() {
                 traffic: traffic::Traffic::load(data_dir.join("traffic.json")),
                 data_dir,
                 launch,
+                portable: portable.is_some(),
                 update: Mutex::new(None),
             });
 

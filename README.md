@@ -46,6 +46,9 @@ VPN-клиент для Windows на ядре [sing-box](https://github.com/Sage
 [Releases](https://github.com/ThisIsSuigetsu/shredingerbox/releases/latest) и запусти.
 Права администратора для установки не нужны. Подробная инструкция - в [FRIENDS.md](FRIENDS.md).
 
+Без установки - `ShredingerBox_…_x64-portable.zip`: распакуй куда угодно и запусти `ShredingerBox.exe`.
+Пока рядом лежит `portable.txt`, настройки хранятся в папке `data` рядом с программой.
+
 Есть сборка для macOS, но пока она экспериментальная: работает только режим «Прокси», без
 автозапуска, и приложение не подписано сертификатом Apple - первый запуск через правый клик →
 «Открыть».

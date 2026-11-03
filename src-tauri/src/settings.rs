@@ -151,6 +151,8 @@ pub struct Settings {
     pub advanced: Advanced,
     pub reminder: Reminder,
     pub general: General,
+    /// Версия, для которой уже показали окно «Что нового».
+    pub seen_version: Option<String>,
 }
 
 impl Settings {
