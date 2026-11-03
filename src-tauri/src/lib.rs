@@ -210,7 +210,10 @@ fn get_state(state: State<AppState>) -> FullState {
 #[tauri::command]
 async fn save_settings(app: AppHandle, state: State<'_, AppState>, settings: Settings) -> Result<Status, String> {
     state.store(settings)?;
-    restart_if_running(&app, &state).await?;
+    // Перезапуск сначала гасит ядро — если он не удался, VPN уже выключен.
+    let restarted = restart_if_running(&app, &state).await;
+    update_indicators(&app);
+    restarted?;
     Ok(state.status())
 }
 
@@ -280,13 +283,16 @@ fn remove_server(state: State<AppState>, id: String) -> Result<Settings, String>
 #[tauri::command]
 async fn connect(app: AppHandle, state: State<'_, AppState>) -> Result<Status, String> {
     let s = state.snapshot();
-    state.core.start(&app, &s, &state.data_dir).await?;
+    let started = state.core.start(&app, &s, &state.data_dir).await;
+    update_indicators(&app);
+    started?;
     Ok(state.status())
 }
 
 #[tauri::command]
-fn disconnect(state: State<AppState>) -> Status {
+fn disconnect(app: AppHandle, state: State<AppState>) -> Status {
     state.core.stop();
+    update_indicators(&app);
     state.status()
 }
 
@@ -356,7 +362,9 @@ async fn select_server(app: AppHandle, state: State<'_, AppState>, id: String) -
         && !clash_select(state.core.api_port, &state.core.secret, &core::server_tag(&id)).await
     {
         // Сервера нет в запущенном конфиге (добавлен после подключения) — перезапускаем.
-        restart_if_running(&app, &state).await?;
+        let restarted = restart_if_running(&app, &state).await;
+        update_indicators(&app);
+        restarted?;
     }
     Ok(state.status())
 }
@@ -501,25 +509,47 @@ async fn set_autostart(state: State<'_, AppState>, enabled: bool) -> Result<bool
 
 const TRAY_OFF: &[u8] = include_bytes!("../icons/tray-off.png");
 const TRAY_ON: &[u8] = include_bytes!("../icons/tray-on.png");
+// Иконка окна: маскот спит или выглядывает (рисунки — icons/state-*.svg).
+const WINDOW_OFF: &[u8] = include_bytes!("../icons/state-sleep.png");
+const WINDOW_ON: &[u8] = include_bytes!("../icons/state-peek.png");
+// Мятная точка поверх кнопки на панели задач — видна, даже если ярлык закреплён.
+const OVERLAY_ON: &[u8] = include_bytes!("../icons/overlay-on.png");
 
-/// Интерфейс сообщает, подключены ли мы, — трей обновляет иконку, текст и подсказку.
-#[tauri::command]
-fn set_tray_state(app: AppHandle, items: State<TrayItems>, connected: bool) {
+/// Трей, меню трея и панель задач — по тому, работает ли ядро на самом деле.
+/// Вызывается после каждого подключения, отключения, перезапуска и падения ядра.
+pub(crate) fn update_indicators(app: &AppHandle) {
+    let connected = app
+        .try_state::<AppState>()
+        .map(|s| s.core.is_running())
+        .unwrap_or(false);
+    let image = |bytes: &[u8]| tauri::image::Image::from_bytes(bytes).ok();
     if let Some(tray) = app.tray_by_id("main") {
-        if let Ok(icon) = tauri::image::Image::from_bytes(if connected { TRAY_ON } else { TRAY_OFF }) {
+        if let Some(icon) = image(if connected { TRAY_ON } else { TRAY_OFF }) {
             let _ = tray.set_icon(Some(icon));
         }
-    }
-    let _ = items
-        .toggle
-        .set_text(if connected { "Отключиться" } else { "Подключиться" });
-    if let Some(tray) = app.tray_by_id("main") {
         let _ = tray.set_tooltip(Some(if connected {
             "ShredingerBox — подключено"
         } else {
             "ShredingerBox — отключено"
         }));
     }
+    if let Some(items) = app.try_state::<TrayItems>() {
+        let _ = items
+            .toggle
+            .set_text(if connected { "Отключиться" } else { "Подключиться" });
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        if let Some(icon) = image(if connected { WINDOW_ON } else { WINDOW_OFF }) {
+            let _ = window.set_icon(icon);
+        }
+        #[cfg(windows)]
+        let _ = window.set_overlay_icon(if connected { image(OVERLAY_ON) } else { None });
+    }
+}
+
+#[tauri::command]
+fn sync_indicators(app: AppHandle) {
+    update_indicators(&app);
 }
 
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
@@ -616,6 +646,7 @@ pub fn run() {
             });
 
             build_tray(app)?;
+            update_indicators(app.handle());
 
             if let Some(window) = app.get_webview_window("main") {
                 // Из автозапуска стартуем тихо — сразу в трей.
@@ -663,7 +694,7 @@ pub fn run() {
             check_update,
             install_update,
             set_autostart,
-            set_tray_state
+            sync_indicators
         ])
         .build(tauri::generate_context!())
         .expect("не удалось запустить ShredingerBox");

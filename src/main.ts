@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
-import { mascot } from "./mascot";
+import { mascot, type Mood } from "./mascot";
 
 // ---------- типы (зеркало Rust-структур) ----------
 
@@ -228,8 +228,15 @@ async function saveSettings(change: (s: Settings) => void, okText?: string) {
     if (status.running && okText) toast(okText);
   } catch (e) {
     toast(errText(e), true);
+    await refreshStatus();
   }
   render();
+}
+
+/** После ошибки ядро могло остановиться — берём настоящее состояние у Rust. */
+async function refreshStatus() {
+  try { st.status = await invoke<Status>("get_status"); } catch { return; }
+  if (!st.status.running) stopTraffic();
 }
 
 async function toggleConnect() {
@@ -254,14 +261,19 @@ async function toggleConnect() {
     else toast(errText(e), true);
   }
   st.busy = false;
-  syncTray();
+  syncIndicators();
   render();
   // Пинг выбранного сервера сразу через туннель
   if (st.status?.running) setTimeout(pingAll, 1500);
 }
 
-function syncTray() {
-  invoke("set_tray_state", { connected: !!st.status?.running }).catch(() => {});
+/** Трей и панель задач Rust обновляет сам, а тут — на всякий случай, по настоящему состоянию ядра. */
+function syncIndicators() {
+  invoke("sync_indicators").catch(() => {});
+}
+
+function mood(): Mood {
+  return st.busy ? "wink" : st.status?.running ? "peek" : "sleep";
 }
 
 function startTraffic(attempt = 0) {
@@ -311,7 +323,7 @@ function sidebar(): string {
        <button class="x-btn" data-action="refresh-subs" aria-label="Обновить подписку" title="Обновить подписку">${icon.refresh}</button></div>`
     : "";
   return `<nav class="side" aria-label="Разделы">
-    <div class="brand">${mascot(36)}<span>ShredingerBox</span></div>
+    <div class="brand">${mascot(36, mood())}<span>ShredingerBox</span></div>
     ${nav("main", "Главная", icon.power())}
     ${nav("servers", "Серверы", icon.globe)}
     ${nav("rules", "Правила", icon.rules)}
@@ -608,7 +620,7 @@ function modalView(): string {
   } else if (m.kind === "reminder") {
     body = `<div class="modal" role="dialog" aria-label="Пора продлить подписку">${head("Пора продлить подписку")}
       <div class="modal-body" style="flex-direction:row;align-items:center;gap:16px">
-        <div style="flex-shrink:0">${mascot(72)}</div>
+        <div style="flex-shrink:0">${mascot(72, mood())}</div>
         <p style="margin:0;line-height:1.55">Сегодня 20-е — напиши <b>Suigetsu</b> в Telegram, чтобы продлить подписку на VPN.</p>
       </div>
       <div class="modal-foot"><button class="btn-ghost" data-action="reminder-disable">Больше не напоминать</button><span class="grow"></span>
@@ -681,7 +693,7 @@ async function onAction(action: string, el: HTMLElement, ev: Event) {
       try {
         st.status = await invoke<Status>("select_server", { id });
         if (st.status.running) { toast("Сервер переключён"); pingAll(); }
-      } catch (e) { toast(errText(e), true); }
+      } catch (e) { toast(errText(e), true); await refreshStatus(); }
       return render();
     }
     case "remove-server": {
@@ -932,7 +944,7 @@ async function init() {
   await listen<{ code: number | null; last: string }>("core-exit", (e: { payload: { code: number | null; last: string } }) => {
     stopTraffic();
     if (st.status) st.status.running = false;
-    syncTray();
+    syncIndicators();
     const last = e.payload.last || "";
     // Частая ошибка Windows при быстром перезапуске TUN — просто пробуем ещё раз.
     if (/configure tun interface/i.test(last) && tunRetries < 2 && Date.now() - st.connectedAt < 60000) {
@@ -954,7 +966,7 @@ async function init() {
   setInterval(checkReminder, 30 * 60 * 1000);
   if (full.settings.servers.length) pingAll();
   st.autostart = await invoke<boolean>("get_autostart").catch(() => false);
-  syncTray();
+  syncIndicators();
   render();
   const flags: { autostart: boolean; autoconnect: boolean } = await invoke("startup_flags");
   // Буфер проверяем при запуске и каждый раз, когда окно получает фокус.

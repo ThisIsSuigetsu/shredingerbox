@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+<rect width="512" height="512" rx="112" fill="#1C212B"/>
+<polygon points="96,290 150,290 110,238 52,262" fill="#343B4A"/>
+<polygon points="416,290 362,290 402,238 460,262" fill="#343B4A"/>
+<g transform="translate(0 18)">
+<polygon points="168,196 176,108 230,170" fill="#E4E8EF" stroke="#AEB6C4" stroke-width="5" stroke-linejoin="round"/>
+<polygon points="344,196 336,108 282,170" fill="#E4E8EF" stroke="#AEB6C4" stroke-width="5" stroke-linejoin="round"/>
+<polygon points="184,180 188,132 216,166" fill="#E9A7B5"/>
+<polygon points="328,180 324,132 296,166" fill="#E9A7B5"/>
+<ellipse cx="256" cy="252" rx="100" ry="88" fill="#F3DCC8"/>
+<path d="M156,252 C150,172 208,150 256,150 C304,150 362,172 356,252 L342,224 L324,240 L304,206 L280,230 L256,200 L232,230 L208,206 L188,240 L170,224 Z" fill="#E4E8EF" stroke="#AEB6C4" stroke-width="5" stroke-linejoin="round"/>
+<path d="M197,258 Q214,272 231,258" fill="none" stroke="#232838" stroke-width="6" stroke-linecap="round"/><path d="M281,258 Q298,272 315,258" fill="none" stroke="#232838" stroke-width="6" stroke-linecap="round"/>
+<ellipse cx="184" cy="280" rx="14" ry="7" fill="#E9A7B5" opacity="0.7"/>
+<ellipse cx="328" cy="280" rx="14" ry="7" fill="#E9A7B5" opacity="0.7"/>
+<path d="M244,278 Q250,285 256,278 Q262,285 268,278" fill="none" stroke="#232838" stroke-width="4" stroke-linecap="round"/>
+</g>
+<text x="372" y="168" font-family="Segoe UI, system-ui, sans-serif" font-size="44" font-weight="700" fill="#8B93A3">z</text>
+<text x="404" y="124" font-family="Segoe UI, system-ui, sans-serif" font-size="60" font-weight="700" fill="#8B93A3">Z</text>
+<rect x="96" y="290" width="320" height="140" rx="12" fill="#2A303C"/>
+<rect x="96" y="290" width="320" height="12" fill="#3A4252"/>
+
+<text x="256" y="396" text-anchor="middle" font-family="Segoe UI, system-ui, sans-serif" font-size="80" font-weight="700" fill="#5A6273">?</text>
+</svg>

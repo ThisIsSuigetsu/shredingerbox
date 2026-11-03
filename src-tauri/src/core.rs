@@ -173,6 +173,8 @@ impl Core {
                         let state = app2.state::<crate::AppState>();
                         if state.core.generation.load(Ordering::SeqCst) == gen {
                             state.core.mark_stopped();
+                            // Ядро упало само — иконки меняем сразу, даже если окно спрятано.
+                            crate::update_indicators(&app2);
                             let _ = app2.emit(
                                 "core-exit",
                                 serde_json::json!({ "code": payload.code, "last": last_line }),
