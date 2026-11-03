@@ -5,7 +5,7 @@ use crate::links;
 use crate::settings::{Mode, Settings};
 use crate::system;
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -20,8 +20,16 @@ pub fn server_tag(id: &str) -> String {
     format!("srv-{id}")
 }
 
+/// Ядро, запущенное от root (TUN на macOS): сам процесс osascript и папка с его файлами.
+/// Убить root-процесс отсюда нельзя - его просят выключиться файлом tun.stop.
+struct RootCore {
+    child: std::process::Child,
+    dir: PathBuf,
+}
+
 pub struct Core {
     child: Mutex<Option<CommandChild>>,
+    root: Mutex<Option<RootCore>>,
     /// Номер запуска: чтобы событие «процесс завершился» от старого запуска
     /// не сбросило состояние нового (при переподключении).
     generation: AtomicU64,
@@ -44,6 +52,7 @@ impl Core {
             .collect();
         Self {
             child: Mutex::new(None),
+            root: Mutex::new(None),
             generation: AtomicU64::new(0),
             mode: Mutex::new(None),
             proxy_set: AtomicBool::new(false),
@@ -64,7 +73,7 @@ impl Core {
     }
 
     pub fn is_running(&self) -> bool {
-        self.child.lock().unwrap().is_some()
+        self.child.lock().unwrap().is_some() || self.root.lock().unwrap().is_some()
     }
 
     pub fn logs(&self) -> Vec<String> {
@@ -146,6 +155,18 @@ impl Core {
             return Err(format!("Ядро отклонило конфиг: {}", err.trim()));
         }
 
+        // macOS: TUN требует root - запускаем ядро через системное окно пароля.
+        #[cfg(target_os = "macos")]
+        if settings.mode == Mode::Tun {
+            let child = mac_tun::spawn(&cfg_path, data_dir).await?;
+            let gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+            *self.root.lock().unwrap() = Some(RootCore { child, dir: data_dir.to_path_buf() });
+            *self.mode.lock().unwrap() = Some(settings.mode);
+            mac_tun::watch(app.clone(), gen, data_dir.to_path_buf());
+            crate::traffic::spawn_counter(app.clone(), gen, self.api_port, self.secret.clone());
+            return Ok(());
+        }
+
         let (mut rx, child) = app
             .shell()
             .sidecar("sing-box")
@@ -206,6 +227,7 @@ impl Core {
     /// Сбросить состояние после остановки процесса (без убийства - он уже мёртв).
     fn mark_stopped(&self) {
         self.child.lock().unwrap().take();
+        self.root.lock().unwrap().take();
         let was_tun = self.mode.lock().unwrap().take() == Some(Mode::Tun);
         if was_tun {
             *self.tun_stopped_at.lock().unwrap() = Some(Instant::now());
@@ -221,6 +243,135 @@ impl Core {
         if let Some(child) = self.child.lock().unwrap().take() {
             let _ = child.kill();
         }
+        if let Some(mut root) = self.root.lock().unwrap().take() {
+            // Сторож в root-скрипте раз в секунду проверяет этот файл и гасит ядро.
+            let _ = std::fs::write(root.dir.join("tun.stop"), b"");
+            for _ in 0..40 {
+                if matches!(root.child.try_wait(), Ok(Some(_))) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
         self.mark_stopped();
+    }
+}
+
+/// TUN на macOS: ядро работает от root, пока жив клиент и нет файла tun.stop.
+#[cfg(target_os = "macos")]
+mod mac_tun {
+    use std::io::{Read, Seek, SeekFrom};
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command, Stdio};
+    use std::time::Duration;
+    use tauri::{AppHandle, Emitter, Manager};
+
+    /// Строка в одинарных кавычках для sh.
+    fn sh(s: &str) -> String {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+
+    /// Строка для AppleScript в двойных кавычках.
+    fn applescript(s: &str) -> String {
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+
+    /// Показывает окно пароля администратора и запускает ядро от root.
+    /// Возвращает, когда ядро стартовало, или ошибку, если пароль не ввели.
+    pub async fn spawn(cfg: &str, data_dir: &Path) -> Result<Child, String> {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let sing_box = exe.parent().ok_or("Не найдена папка программы")?.join("sing-box");
+        // У ядра от root своя рабочая папка: его cache.db принадлежит root,
+        // и ядро в режиме «Прокси» (от пользователя) не смогло бы его открыть.
+        let work = data_dir.join("tun");
+        let (log, pid, stop) = (data_dir.join("tun.log"), data_dir.join("tun.pid"), data_dir.join("tun.stop"));
+        let _ = std::fs::remove_file(&stop);
+        let _ = std::fs::remove_file(&pid);
+        let p = |x: &Path| sh(&x.to_string_lossy());
+        let script = format!(
+            "mkdir -p {work}; {sb} run --disable-color -c {cfg} -D {work} > {log} 2>&1 & core=$!; echo $core > {pid}; \
+             while kill -0 $core 2>/dev/null; do \
+             if [ -e {stop} ] || ! kill -0 {app} 2>/dev/null; then kill $core; fi; sleep 1; done; \
+             rm -f {pid} {stop}",
+            work = p(&work),
+            sb = p(&sing_box),
+            cfg = sh(cfg),
+            log = p(&log),
+            pid = p(&pid),
+            stop = p(&stop),
+            app = std::process::id(),
+        );
+        let mut child = Command::new("/usr/bin/osascript")
+            .arg("-e")
+            .arg(format!("do shell script {} with administrator privileges", applescript(&script)))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Не удалось запросить права администратора: {e}"))?;
+        // Ждём, пока введут пароль и ядро запишет свой pid, или пока osascript не завершится.
+        for _ in 0..1500 {
+            if pid.exists() {
+                return Ok(child);
+            }
+            if let Ok(Some(_)) = child.try_wait() {
+                let mut err = String::new();
+                if let Some(mut e) = child.stderr.take() {
+                    let _ = e.read_to_string(&mut err);
+                }
+                if err.contains("-128") {
+                    return Err("Подключение отменено: для TUN macOS спрашивает пароль администратора. \
+                                Без пароля работает режим «Прокси»."
+                        .into());
+                }
+                let last = std::fs::read_to_string(&log).unwrap_or_default();
+                let last = last.lines().last().unwrap_or(err.trim()).to_string();
+                return Err(format!("Ядро не запустилось: {last}"));
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        Err("Пароль администратора так и не ввели - подключение отменено".into())
+    }
+
+    /// Читает tun.log для окна логов и замечает, когда ядро остановилось само.
+    pub fn watch(app: AppHandle, generation: u64, data_dir: PathBuf) {
+        std::thread::spawn(move || {
+            let log = data_dir.join("tun.log");
+            let mut pos = 0u64;
+            let mut last = String::new();
+            loop {
+                std::thread::sleep(Duration::from_millis(500));
+                let state = app.state::<crate::AppState>();
+                if let Ok(mut f) = std::fs::File::open(&log) {
+                    let mut text = String::new();
+                    if f.seek(SeekFrom::Start(pos)).is_ok() && f.read_to_string(&mut text).is_ok() {
+                        pos += text.len() as u64;
+                        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                            last = line.to_string();
+                            state.core.push_log(line.to_string());
+                            let _ = app.emit("core-log", line.to_string());
+                        }
+                    }
+                }
+                if state.core.generation() != generation {
+                    break;
+                }
+                let exited = state
+                    .core
+                    .root
+                    .lock()
+                    .unwrap()
+                    .as_mut()
+                    .map_or(true, |r| matches!(r.child.try_wait(), Ok(Some(_))));
+                if exited {
+                    if state.core.generation() == generation {
+                        state.core.mark_stopped();
+                        crate::update_indicators(&app);
+                        let _ = app.emit("core-exit", serde_json::json!({ "code": null, "last": last }));
+                    }
+                    break;
+                }
+            }
+        });
     }
 }

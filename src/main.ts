@@ -8,6 +8,7 @@ import { inline, parseItems, releasesBetween, type Release } from "./changelog";
 // ---------- типы (зеркало Rust-структур) ----------
 
 type Mode = "tun" | "proxy";
+type Theme = "system" | "dark" | "light";
 type FinalRoute = "proxy" | "direct";
 interface Server { id: string; name: string; link: string; subscription: string | null }
 interface AppRule { name: string; exe: string }
@@ -19,10 +20,10 @@ interface Settings {
   rules: { final_route: FinalRoute; proxy_apps: AppRule[]; direct_apps: AppRule[]; proxy_domains: string[]; direct_domains: string[]; presets: string[] };
   advanced: { enabled: boolean; mixed_port: number; allow_lan: boolean; log_level: string; remote_dns: string };
   reminder: { enabled: boolean; last_shown: string | null };
-  general: { autoconnect: boolean; close_to_tray: boolean; clipboard_offer: boolean; check_updates: boolean };
+  general: { autoconnect: boolean; close_to_tray: boolean; clipboard_offer: boolean; check_updates: boolean; theme: Theme };
   seen_version: string | null;
 }
-interface Status { running: boolean; mode: Mode; server: string | null; api_port: number; secret: string; elevated: boolean; windows: boolean; portable: boolean }
+interface Status { running: boolean; mode: Mode; server: string | null; api_port: number; secret: string; elevated: boolean; windows: boolean; tun: boolean; portable: boolean }
 interface Preset { id: string; title: string; domains: string[] }
 interface Ping { id: string; ms: number | null; udp: boolean; via_vpn: boolean }
 interface Proc { name: string; exe: string }
@@ -95,8 +96,8 @@ const icon = {
   x: (s = 14) => `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>`,
   refresh: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.6-4.5L4 8M4 4v4h4M4 13a8 8 0 0 0 14.6 4.5L20 16M20 20v-4h-4"/></svg>`,
   info: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" style="flex-shrink:0;margin-top:1px"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>`,
-  down: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#3DDC97" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Загрузка"><path d="M12 5v14M6 13l6 6 6-6"/></svg>`,
-  up: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8FB8FF" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Отдача"><path d="M12 19V5M6 11l6-6 6 6"/></svg>`,
+  down: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" style="color:var(--accent-ink)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Загрузка"><path d="M12 5v14M6 13l6 6 6-6"/></svg>`,
+  up: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" style="color:var(--blue)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Отдача"><path d="M12 19V5M6 11l6-6 6 6"/></svg>`,
 };
 
 /** «🇳🇱 Нидерланды» → { code: "NL", name: "Нидерланды" } */
@@ -117,7 +118,7 @@ function pingView(id: string): string {
   if (p.udp) return `<span class="ping muted" title="Hysteria2 работает по UDP - TCP-пинг не меряется">UDP</span>`;
   if (p.ms == null) return `<span class="ping" style="color:var(--danger)">нет ответа</span>`;
   const good = p.via_vpn ? 300 : 120;
-  const color = p.ms <= good ? "var(--accent)" : p.ms <= good * 2.5 ? "var(--amber)" : "var(--danger)";
+  const color = p.ms <= good ? "var(--accent-ink)" : p.ms <= good * 2.5 ? "var(--amber)" : "var(--danger)";
   const title = p.via_vpn ? "Реальная задержка через VPN" : "TCP-подключение к серверу";
   return `<span class="ping" style="color:${color}" title="${title}">${p.ms} мс</span>`;
 }
@@ -487,7 +488,9 @@ function mainView(): string {
     <div class="home-side">
       <section class="card">
         <h2>Режим</h2>
-        ${windows ? modeOpt("tun", "TUN", "Весь трафик системы по правилам") : modeOpt("tun", "TUN", "Пока только в Windows", true)}
+        ${!(st.status?.tun ?? true) ? modeOpt("tun", "TUN", "Пока недоступно на этой системе", true)
+          : windows ? modeOpt("tun", "TUN", "Весь трафик системы по правилам")
+          : modeOpt("tun", "TUN", "Весь трафик · пароль администратора при подключении")}
         ${modeOpt("proxy", "Прокси", "Только программы с системным прокси")}
       </section>
       <section class="card servers">
@@ -637,12 +640,15 @@ function settingsView(): string {
         ${sw(g.check_updates, "toggle-updates", "Проверять обновления")}</div>
       <div class="set-row"><div class="t"><b>Предлагать ключи из буфера обмена</b><span>Скопировал ключ или подписку - открыл клиент - он предложит добавить</span></div>
         ${sw(g.clipboard_offer, "toggle-clipboard", "Предлагать ключи из буфера обмена")}</div>
+      <div class="set-row"><div class="t"><b>Тема</b><span>«Как в системе» - светлая или тёмная вслед за ${windows ? "Windows" : "macOS"}</span></div>
+        <div class="seg inset" role="group" aria-label="Тема">${([["system", "Как в системе"], ["dark", "Тёмная"], ["light", "Светлая"]] as [Theme, string][])
+          .map(([v, l]) => `<button class="${g.theme === v ? "on" : ""}" aria-pressed="${g.theme === v}" data-action="set-theme" data-value="${v}">${l}</button>`).join("")}</div></div>
       <div class="set-row"><div class="t"><b>Сворачивать в трей при закрытии</b><span>Крестик прячет окно, VPN продолжает работать</span></div>
         ${sw(g.close_to_tray, "toggle-tray", "Сворачивать в трей при закрытии")}</div>
     </section>`;
   const basic = behaviour + `<section class="card" style="gap:0;padding:6px 16px">
       ${windows ? `<div class="set-row"><div class="t"><b>Права администратора</b><span>Нужны для режима TUN</span></div>
-        ${st.status?.elevated ? `<span style="color:var(--accent);font-size:13px;font-weight:600">Есть</span>` : `<button class="btn-ghost" data-action="restart-admin">Перезапустить с правами</button>`}</div>` : ""}
+        ${st.status?.elevated ? `<span style="color:var(--accent-ink);font-size:13px;font-weight:600">Есть</span>` : `<button class="btn-ghost" data-action="restart-admin">Перезапустить с правами</button>`}</div>` : ""}
       <div class="set-row"><div class="t"><b>Папка данных</b><span>Настройки, конфиг и кэш ядра</span></div>
         <button class="btn-ghost" data-action="open-data-dir">Открыть</button></div>
       <div class="set-row"><div class="t"><b>Напоминание о продлении подписки</b><span>Каждое 20-е число - написать Suigetsu в Telegram</span></div>
@@ -799,7 +805,17 @@ function modalView(): string {
   return `<div class="overlay" data-action="overlay">${body}</div>`;
 }
 
+const lightQuery = window.matchMedia("(prefers-color-scheme: light)");
+lightQuery.addEventListener("change", () => applyTheme());
+
+/** Тема из настроек; «как в системе» - по светлой или тёмной теме Windows / macOS. */
+function applyTheme() {
+  const t = st.settings?.general.theme ?? "system";
+  document.documentElement.dataset.theme = t === "system" ? (lightQuery.matches ? "light" : "dark") : t;
+}
+
 function render() {
+  applyTheme();
   if (!st.settings) {
     root.innerHTML = `<div class="app" style="align-items:center;justify-content:center">${mascot(72)}</div>`;
     return;
@@ -982,6 +998,7 @@ async function onAction(action: string, el: HTMLElement, ev: Event) {
     }
     case "toggle-autoconnect": return saveSettings((x) => { x.general.autoconnect = !x.general.autoconnect; });
     case "toggle-tray": return saveSettings((x) => { x.general.close_to_tray = !x.general.close_to_tray; });
+    case "set-theme": return saveSettings((x) => { x.general.theme = el.dataset.value as Theme; });
     case "remove-sub": {
       try { st.settings = await invoke<Settings>("remove_subscription", { url: el.dataset.url }); toast("Подписка удалена"); } catch (e) { toast(errText(e), true); }
       return render();

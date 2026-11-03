@@ -88,6 +88,7 @@ impl AppState {
             secret: self.core.secret.clone(),
             elevated: system::is_elevated(),
             windows: cfg!(windows),
+            tun: settings::TUN_AVAILABLE,
             portable: self.portable,
         }
     }
@@ -101,8 +102,10 @@ struct Status {
     api_port: u16,
     secret: String,
     elevated: bool,
-    /// TUN, права администратора и автозапуск пока есть только в Windows.
+    /// Права администратора и автозапуск пока есть только в Windows.
     windows: bool,
+    /// Можно ли включить TUN (Windows, macOS).
+    tun: bool,
     portable: bool,
 }
 

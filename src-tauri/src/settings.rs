@@ -10,12 +10,13 @@ pub enum Mode {
     Proxy,
 }
 
-/// TUN пока сделан только для Windows: на macOS для него нужен root и свой помощник.
-pub const TUN_AVAILABLE: bool = cfg!(windows);
+/// TUN есть в Windows и macOS. На macOS ядро для него запускается от root через окно
+/// пароля при каждом подключении, поэтому там по умолчанию «Прокси».
+pub const TUN_AVAILABLE: bool = cfg!(any(windows, target_os = "macos"));
 
 impl Default for Mode {
     fn default() -> Self {
-        if TUN_AVAILABLE {
+        if cfg!(windows) {
             Mode::Tun
         } else {
             Mode::Proxy
@@ -132,11 +133,19 @@ pub struct General {
     pub clipboard_offer: bool,
     /// Проверять обновления клиента на GitHub.
     pub check_updates: bool,
+    /// «system», «dark» или «light».
+    pub theme: String,
 }
 
 impl Default for General {
     fn default() -> Self {
-        Self { autoconnect: true, close_to_tray: true, clipboard_offer: true, check_updates: true }
+        Self {
+            autoconnect: true,
+            close_to_tray: true,
+            clipboard_offer: true,
+            check_updates: true,
+            theme: "system".into(),
+        }
     }
 }
 
@@ -161,7 +170,7 @@ impl Settings {
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
-        // Старые версии на Mac сохраняли TUN, который там не работает.
+        // TUN, сохранённый на системе, где его нет, - на «Прокси».
         if !TUN_AVAILABLE {
             s.mode = Mode::Proxy;
         }
