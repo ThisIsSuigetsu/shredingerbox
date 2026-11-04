@@ -380,9 +380,33 @@ async fn check_services(state: State<'_, AppState>) -> Result<Vec<ServiceCheck>,
     Ok(out)
 }
 
+/// Меняет ли правка конфиг ядра. Язык, тема, трей, напоминание и настройки загрузки подписок
+/// его не трогают - ради них VPN не переподключаем.
+fn affects_core(old: &Settings, new: &Settings) -> bool {
+    let strip = |s: &Settings| {
+        let mut s = s.clone();
+        s.general = Default::default();
+        s.reminder = Default::default();
+        s.seen_version = None;
+        s.advanced.enabled = false;
+        s.advanced.sub_update_hours = 0;
+        s.advanced.sub_user_agent.clear();
+        for sub in &mut s.subscriptions {
+            sub.name.clear();
+            sub.updated = None;
+        }
+        s
+    };
+    strip(old) != strip(new)
+}
+
 #[tauri::command]
 async fn save_settings(app: AppHandle, state: State<'_, AppState>, settings: Settings) -> Result<Status, String> {
+    let restart = affects_core(&state.snapshot(), &settings);
     state.store(settings)?;
+    if !restart {
+        return Ok(state.status());
+    }
     // Перезапуск сначала гасит ядро - если он не удался, VPN уже выключен.
     let restarted = restart_if_running(&app, &state).await;
     update_indicators(&app);
@@ -927,4 +951,22 @@ pub fn run() {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn language_and_theme_do_not_restart_core() {
+        let old = Settings::default();
+        let mut new = old.clone();
+        new.general.language = "en".into();
+        new.general.theme = "light".into();
+        new.reminder.day = 5;
+        new.advanced.sub_update_hours = 24;
+        assert!(!affects_core(&old, &new));
+        new.advanced.block_quic = true;
+        assert!(affects_core(&old, &new));
+    }
 }

@@ -1170,9 +1170,10 @@ async function onAction(action: string, el: HTMLElement, ev: Event) {
     case "toggle-tray": return saveSettings((x) => { x.general.close_to_tray = !x.general.close_to_tray; });
     case "set-theme": return saveSettings((x) => { x.general.theme = el.dataset.value as Theme; });
     case "set-language": {
-      await saveSettings((x) => { x.general.language = el.dataset.value as LangSetting; });
+      // Язык меняем сразу, а сохраняем следом - не ждём ответа Rust.
+      st.settings = { ...s, general: { ...s.general, language: el.dataset.value as LangSetting } };
       applyLanguage();
-      return render();
+      return saveSettings(() => {});
     }
     case "export-settings": {
       const path = await save({ defaultPath: "shredingerbox-settings.json", filters: [{ name: "JSON", extensions: ["json"] }] });

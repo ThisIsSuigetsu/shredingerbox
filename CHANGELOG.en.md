@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.1
+
+- Language and theme switch instantly. The VPN no longer reconnects when you change the language,
+  theme, tray, reminder or subscription download settings.
+- Minor fixes.
+
 ## 0.8.0
 
 - English. The language follows the system by default; you can pick "Русский" or "English" in

@@ -406,7 +406,7 @@ mod tests {
 
     #[test]
     fn hy2_salamander() {
-        let p = parse("hy2://p%40ss@blockhaven.example.org:443?sni=blockhaven.example.org&obfs=salamander&obfs-password=secret&insecure=0#RU").unwrap();
+        let p = parse("hy2://p%40ss@server.example.org:443?sni=server.example.org&obfs=salamander&obfs-password=secret&insecure=0#RU").unwrap();
         assert_eq!(p.outbound["type"], "hysteria2");
         assert_eq!(p.outbound["password"], "p@ss");
         assert_eq!(p.outbound["obfs"]["type"], "salamander");
