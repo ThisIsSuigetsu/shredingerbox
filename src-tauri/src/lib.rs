@@ -1,5 +1,6 @@
 mod config;
 mod core;
+mod i18n;
 mod links;
 mod presets;
 mod settings;
@@ -7,6 +8,7 @@ mod system;
 mod traffic;
 
 use serde::Serialize;
+use i18n::tr;
 use settings::{Mode, Server, Settings, Subscription};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -59,9 +61,19 @@ struct UpdateInfo {
     notes: Option<String>,
 }
 
-/// Пункт меню трея «Подключиться / Отключиться» - его текст меняется.
+/// Пункты меню трея: их текст меняется при подключении и смене языка.
 struct TrayItems {
+    show: MenuItem<Wry>,
     toggle: MenuItem<Wry>,
+    quit: MenuItem<Wry>,
+}
+
+/// Секунды Unix - когда обновили подписку.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 const PENDING_CONNECT: &str = "pending-connect";
@@ -114,7 +126,31 @@ struct FullState {
     settings: Settings,
     status: Status,
     presets: Vec<presets::Preset>,
+    /// Стандартные значения продвинутого режима - для кнопки «Сбросить».
+    defaults: settings::Advanced,
 }
+
+#[derive(Serialize)]
+struct ServiceCheck {
+    name: &'static str,
+    ok: bool,
+    ms: Option<u64>,
+    /// HTTP-код ответа или текст ошибки соединения.
+    detail: String,
+}
+
+/// Сервисы для проверки «открывается ли через текущее подключение».
+/// Для API ChatGPT и Claude ответ 401 значит «доступно», 403 - «недоступно в этой стране».
+const SERVICES: &[(&str, &str)] = &[
+    ("YouTube", "https://www.youtube.com/generate_204"),
+    ("Discord", "https://discord.com/api/v9/gateway"),
+    ("ChatGPT", "https://api.openai.com/v1/models"),
+    ("Claude", "https://api.anthropic.com/v1/models"),
+    ("Instagram", "https://www.instagram.com/"),
+    ("X / Twitter", "https://x.com/"),
+    ("Spotify", "https://open.spotify.com/"),
+    ("Telegram", "https://web.telegram.org/"),
+];
 
 #[derive(Serialize)]
 struct Ping {
@@ -179,9 +215,14 @@ async fn restart_if_running(app: &AppHandle, state: &AppState) -> Result<(), Str
     Ok(())
 }
 
-async fn fetch_subscription(url: &str) -> Result<Vec<String>, String> {
+async fn fetch_subscription(url: &str, user_agent: &str) -> Result<Vec<String>, String> {
+    let ua = if user_agent.trim().is_empty() {
+        format!("ShredingerBox/{}", env!("CARGO_PKG_VERSION"))
+    } else {
+        user_agent.trim().to_string()
+    };
     let client = reqwest::Client::builder()
-        .user_agent("ShredingerBox/0.1")
+        .user_agent(ua)
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| e.to_string())?;
@@ -189,15 +230,19 @@ async fn fetch_subscription(url: &str) -> Result<Vec<String>, String> {
         .get(url)
         .send()
         .await
-        .map_err(|e| format!("Подписка не загрузилась: {e}"))?
+        .map_err(|e| format!("{}: {e}", tr("Подписка не загрузилась", "Subscription failed to load")))?
         .error_for_status()
-        .map_err(|e| format!("Сервер подписки ответил ошибкой: {e}"))?
+        .map_err(|e| format!("{}: {e}", tr("Сервер подписки ответил ошибкой", "Subscription server returned an error")))?
         .text()
         .await
         .map_err(|e| e.to_string())?;
     let links = links::parse_subscription_body(&body);
     if links.is_empty() {
-        return Err("В подписке не нашлось ни одного поддерживаемого сервера".into());
+        return Err(tr(
+            "В подписке не нашлось ни одного поддерживаемого сервера",
+            "The subscription has no supported servers",
+        )
+        .into());
     }
     Ok(links)
 }
@@ -241,7 +286,98 @@ fn get_state(state: State<AppState>) -> FullState {
         settings: state.snapshot(),
         status: state.status(),
         presets: presets::PRESETS.to_vec(),
+        defaults: settings::Advanced { enabled: true, ..Default::default() },
     }
+}
+
+/// Язык интерфейса: Rust переводит ошибки и меню трея.
+#[tauri::command]
+fn set_language(app: AppHandle, english: bool) {
+    i18n::set_english(english);
+    update_indicators(&app);
+}
+
+/// Сохранить все настройки (серверы, подписки, правила) в файл.
+#[tauri::command]
+fn export_settings(state: State<AppState>, path: String) -> Result<(), String> {
+    let mut s = state.snapshot();
+    s.seen_version = None;
+    let json = serde_json::to_string_pretty(&s).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| format!("{}: {e}", tr("Не удалось сохранить файл", "Could not save the file")))
+}
+
+/// Загрузить настройки из файла экспорта и сразу применить их.
+#[tauri::command]
+async fn import_settings(app: AppHandle, state: State<'_, AppState>, path: String) -> Result<Settings, String> {
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("{}: {e}", tr("Не удалось прочитать файл", "Could not read the file")))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|_| tr("Это не файл настроек ShredingerBox", "This is not a ShredingerBox settings file").to_string())?;
+    if value.get("servers").is_none() || value.get("rules").is_none() {
+        return Err(tr("Это не файл настроек ShredingerBox", "This is not a ShredingerBox settings file").into());
+    }
+    let mut s: Settings = serde_json::from_value(value)
+        .map_err(|e| format!("{}: {e}", tr("Файл настроек повреждён", "The settings file is damaged")))?;
+    s.seen_version = state.snapshot().seen_version;
+    if !settings::TUN_AVAILABLE {
+        s.mode = Mode::Proxy;
+    }
+    state.store(s.clone())?;
+    let restarted = restart_if_running(&app, &state).await;
+    update_indicators(&app);
+    restarted?;
+    Ok(s)
+}
+
+/// Открываются ли популярные сервисы. Пока VPN включён - через локальный прокси ядра,
+/// то есть по тем же правилам, что и браузер; без VPN - напрямую.
+#[tauri::command]
+async fn check_services(state: State<'_, AppState>) -> Result<Vec<ServiceCheck>, String> {
+    let port = state.snapshot().advanced.mixed_port;
+    let mut builder = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (ShredingerBox)")
+        .timeout(Duration::from_secs(8));
+    builder = if state.core.is_running() {
+        builder.proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{port}")).map_err(|e| e.to_string())?)
+    } else {
+        builder.no_proxy()
+    };
+    let client = builder.build().map_err(|e| e.to_string())?;
+    let mut tasks = vec![];
+    for &(name, url) in SERVICES {
+        let client = client.clone();
+        tasks.push(tauri::async_runtime::spawn(async move {
+            let started = Instant::now();
+            match client.get(url).send().await {
+                Ok(r) => {
+                    let code = r.status().as_u16();
+                    ServiceCheck {
+                        name,
+                        ok: code < 500 && code != 403 && code != 451,
+                        ms: Some(started.elapsed().as_millis() as u64),
+                        detail: format!("HTTP {code}"),
+                    }
+                }
+                Err(e) => ServiceCheck {
+                    name,
+                    ok: false,
+                    ms: None,
+                    detail: if e.is_timeout() {
+                        tr("нет ответа", "no response").to_string()
+                    } else {
+                        tr("не открывается", "can't connect").to_string()
+                    },
+                },
+            }
+        }));
+    }
+    let mut out = vec![];
+    for t in tasks {
+        if let Ok(c) = t.await {
+            out.push(c);
+        }
+    }
+    Ok(out)
 }
 
 #[tauri::command]
@@ -259,9 +395,14 @@ async fn add_from_text(app: AppHandle, state: State<'_, AppState>, text: String)
     let text = text.trim().to_string();
     let mut s = state.snapshot();
     if text.starts_with("http://") || text.starts_with("https://") {
-        let list = fetch_subscription(&text).await?;
-        if !s.subscriptions.iter().any(|sub| sub.url == text) {
-            s.subscriptions.push(Subscription { url: text.clone(), name: "Подписка".into() });
+        let list = fetch_subscription(&text, &s.advanced.sub_user_agent).await?;
+        match s.subscriptions.iter_mut().find(|sub| sub.url == text) {
+            Some(sub) => sub.updated = Some(now_secs()),
+            None => s.subscriptions.push(Subscription {
+                url: text.clone(),
+                name: tr("Подписка", "Subscription").into(),
+                updated: Some(now_secs()),
+            }),
         }
         merge_subscription(&mut s, &text, list);
     } else {
@@ -283,7 +424,7 @@ async fn add_from_text(app: AppHandle, state: State<'_, AppState>, text: String)
             }
         }
         if added == 0 {
-            return Err(first_err.unwrap_or_else(|| "Вставь ключ или ссылку на подписку".into()));
+            return Err(first_err.unwrap_or_else(|| tr("Вставь ключ или ссылку на подписку", "Paste a key or a subscription link").into()));
         }
     }
     if s.selected.is_none() {
@@ -299,8 +440,11 @@ async fn refresh_subscriptions(state: State<'_, AppState>) -> Result<Settings, S
     let mut s = state.snapshot();
     let urls: Vec<String> = s.subscriptions.iter().map(|sub| sub.url.clone()).collect();
     for url in urls {
-        let list = fetch_subscription(&url).await?;
+        let list = fetch_subscription(&url, &s.advanced.sub_user_agent).await?;
         merge_subscription(&mut s, &url, list);
+        if let Some(sub) = s.subscriptions.iter_mut().find(|sub| sub.url == url) {
+            sub.updated = Some(now_secs());
+        }
     }
     state.store(s.clone())?;
     Ok(s)
@@ -397,7 +541,7 @@ async fn ping_servers(state: State<'_, AppState>) -> Result<Vec<Ping>, String> {
 async fn select_server(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<Status, String> {
     let mut s = state.snapshot();
     if !s.servers.iter().any(|srv| srv.id == id) {
-        return Err("Сервер не найден".into());
+        return Err(tr("Сервер не найден", "Server not found").into());
     }
     s.selected = Some(id.clone());
     state.store(s)?;
@@ -462,8 +606,22 @@ fn restart_as_admin(app: AppHandle, state: State<AppState>) -> Result<(), String
         app.exit(0);
         Ok(())
     } else {
-        Err("Права администратора не выданы".into())
+        Err(tr("Права администратора не выданы", "Administrator rights were not granted").into())
     }
+}
+
+/// Переименовать подписку.
+#[tauri::command]
+fn rename_subscription(state: State<AppState>, url: String, name: String) -> Result<Settings, String> {
+    let mut s = state.snapshot();
+    let name = name.trim();
+    if let Some(sub) = s.subscriptions.iter_mut().find(|sub| sub.url == url) {
+        if !name.is_empty() {
+            sub.name = name.chars().take(60).collect();
+        }
+    }
+    state.store(s.clone())?;
+    Ok(s)
 }
 
 #[tauri::command]
@@ -497,7 +655,7 @@ async fn check_update(app: AppHandle, state: State<'_, AppState>) -> Result<Opti
     let found = updater
         .check()
         .await
-        .map_err(|e| format!("Не удалось проверить обновления: {e}"))?;
+        .map_err(|e| format!("{}: {e}", tr("Не удалось проверить обновления", "Could not check for updates")))?;
     let info = found.as_ref().map(|u| UpdateInfo {
         version: u.version.clone(),
         current: u.current_version.clone(),
@@ -520,7 +678,7 @@ async fn install_update(app: AppHandle, state: State<'_, AppState>) -> Result<()
         .lock()
         .unwrap()
         .take()
-        .ok_or("Сначала проверь обновления")?;
+        .ok_or(tr("Сначала проверь обновления", "Check for updates first"))?;
     state.core.stop();
     let _ = app.emit("update-progress", 0u64);
     let progress = app.clone();
@@ -536,7 +694,7 @@ async fn install_update(app: AppHandle, state: State<'_, AppState>) -> Result<()
             || {},
         )
         .await
-        .map_err(|e| format!("Обновление не установилось: {e}"))?;
+        .map_err(|e| format!("{}: {e}", tr("Обновление не установилось", "The update failed to install")))?;
     app.restart();
 }
 
@@ -575,15 +733,19 @@ pub(crate) fn update_indicators(app: &AppHandle) {
             let _ = tray.set_icon(Some(icon));
         }
         let _ = tray.set_tooltip(Some(if connected {
-            "ShredingerBox - подключено"
+            tr("ShredingerBox - подключено", "ShredingerBox - connected")
         } else {
-            "ShredingerBox - отключено"
+            tr("ShredingerBox - отключено", "ShredingerBox - disconnected")
         }));
     }
     if let Some(items) = app.try_state::<TrayItems>() {
-        let _ = items
-            .toggle
-            .set_text(if connected { "Отключиться" } else { "Подключиться" });
+        let _ = items.toggle.set_text(if connected {
+            tr("Отключиться", "Disconnect")
+        } else {
+            tr("Подключиться", "Connect")
+        });
+        let _ = items.show.set_text(tr("Открыть ShredingerBox", "Open ShredingerBox"));
+        let _ = items.quit.set_text(tr("Выход", "Quit"));
     }
     if let Some(window) = app.get_webview_window("main") {
         if let Some(icon) = image(if connected { WINDOW_ON } else { WINDOW_OFF }) {
@@ -640,7 +802,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         builder = builder.icon(icon.clone());
     }
     builder.build(app)?;
-    app.manage(TrayItems { toggle });
+    app.manage(TrayItems { show, toggle, quit });
     Ok(())
 }
 
@@ -669,6 +831,8 @@ pub fn run() {
             });
             std::fs::create_dir_all(&data_dir).ok();
             let settings = Settings::load(&data_dir.join("settings.json"));
+            // Точный язык «как в системе» пришлёт интерфейс, а явный выбор ставим сразу.
+            i18n::set_english(settings.general.language == "en");
 
             // Метка «подключись после перезапуска» от restart_as_admin через задачу.
             let marker = data_dir.join(PENDING_CONNECT);
@@ -744,7 +908,12 @@ pub fn run() {
             check_update,
             install_update,
             set_autostart,
-            sync_indicators
+            sync_indicators,
+            set_language,
+            export_settings,
+            import_settings,
+            check_services,
+            rename_subscription
         ])
         .build(tauri::generate_context!())
         .expect("не удалось запустить ShredingerBox");

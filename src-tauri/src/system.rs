@@ -98,7 +98,7 @@ mod mac {
     fn for_each_service(cmds: impl Fn(&str) -> Vec<Vec<String>>) -> Result<(), String> {
         let list = services();
         if list.is_empty() {
-            return Err("Не нашлось ни одного сетевого подключения".into());
+            return Err(crate::i18n::tr("Не нашлось ни одного сетевого подключения", "No network connections found").into());
         }
         let mut ok = false;
         let mut last_err = String::new();
@@ -114,7 +114,7 @@ mod mac {
         if ok {
             Ok(())
         } else {
-            Err(format!("macOS не дала изменить системный прокси: {last_err}"))
+            Err(format!("{}: {last_err}", crate::i18n::tr("macOS не дала изменить системный прокси", "macOS did not allow changing the system proxy")))
         }
     }
 
@@ -168,7 +168,7 @@ pub fn set_system_proxy(port: u16) -> Result<(), String> {
         use winreg::RegKey;
         let (key, _) = RegKey::predef(HKEY_CURRENT_USER)
             .create_subkey(INET_KEY)
-            .map_err(|e| format!("Не удалось открыть настройки прокси: {e}"))?;
+            .map_err(|e| format!("{}: {e}", crate::i18n::tr("Не удалось открыть настройки прокси", "Could not open proxy settings")))?;
         key.set_value("ProxyServer", &format!("127.0.0.1:{port}"))
             .map_err(|e| e.to_string())?;
         key.set_value("ProxyOverride", &BYPASS.to_string())
@@ -208,7 +208,7 @@ pub fn restart_as_admin() -> Result<bool, String> {
     }
     #[cfg(not(windows))]
     {
-        Err("Перезапуск с правами администратора пока есть только для Windows".into())
+        Err(crate::i18n::tr("Перезапуск с правами администратора есть только в Windows", "Restarting as administrator is only available on Windows").into())
     }
 }
 
@@ -468,7 +468,7 @@ pub fn set_autostart(enable: bool, data_dir: &std::path::Path) -> Result<bool, S
                 .collect::<Vec<_>>()
                 .join(" ");
             if !win::run_elevated(std::path::Path::new("schtasks.exe"), &params) {
-                return Err("Права администратора не выданы".into());
+                return Err(crate::i18n::tr("Права администратора не выданы", "Administrator rights were not granted").into());
             }
             // Задача создаётся в отдельном процессе - ждём, пока она появится или исчезнет.
             for _ in 0..40 {
@@ -483,7 +483,7 @@ pub fn set_autostart(enable: bool, data_dir: &std::path::Path) -> Result<bool, S
     #[cfg(not(windows))]
     {
         let _ = (enable, data_dir);
-        Err("Автозапуск пока есть только для Windows".into())
+        Err(crate::i18n::tr("Автозапуск пока есть только в Windows", "Autostart is only available on Windows for now").into())
     }
 }
 

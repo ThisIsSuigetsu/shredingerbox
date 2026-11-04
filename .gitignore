@@ -7,3 +7,4 @@ src-tauri/binaries/sing-box-*
 # ключ подписи обновлений - НИКОГДА не в репозиторий
 *.key
 *.key.pub
+.claude/

@@ -2,6 +2,7 @@
 
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
+use crate::i18n::tr;
 use percent_encoding::percent_decode_str;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -36,7 +37,7 @@ pub fn parse(link: &str) -> Result<Parsed, String> {
     } else if lower.starts_with("ss://") {
         parse_ss(&link[5..])
     } else {
-        Err("Неизвестный формат ссылки. Поддерживаются vless://, hy2://, trojan://, ss://".into())
+        Err(tr("Неизвестный формат ссылки. Поддерживаются vless://, hy2://, trojan://, ss://", "Unknown link format. Supported: vless://, hy2://, trojan://, ss://").into())
     }
 }
 
@@ -121,16 +122,16 @@ fn split(rest: &str) -> Result<Parts, String> {
         // IPv6: [2001:db8::1]:443
         let (h, p) = stripped
             .split_once("]:")
-            .ok_or("Не удалось прочитать IPv6-адрес сервера")?;
+            .ok_or(tr("Не удалось прочитать IPv6-адрес сервера", "Could not read the server IPv6 address"))?;
         (h.to_string(), p.to_string())
     } else {
         let (h, p) = hostport
             .rsplit_once(':')
-            .ok_or("В ссылке нет порта сервера")?;
+            .ok_or(tr("В ссылке нет порта сервера", "The link has no server port"))?;
         (h.to_string(), p.to_string())
     };
     if host.is_empty() {
-        return Err("В ссылке нет адреса сервера".into());
+        return Err(tr("В ссылке нет адреса сервера", "The link has no server address").into());
     }
     let mut query = HashMap::new();
     for pair in query_str.split('&').filter(|p| !p.is_empty()) {
@@ -142,7 +143,7 @@ fn split(rest: &str) -> Result<Parts, String> {
 
 fn port_num(p: &str) -> Result<u16, String> {
     p.parse::<u16>()
-        .map_err(|_| format!("Неверный порт сервера: {p}"))
+        .map_err(|_| format!("{}: {p}", tr("Неверный порт сервера", "Invalid server port")))
 }
 
 fn q<'a>(parts: &'a Parts, key: &str) -> Option<&'a str> {
@@ -226,9 +227,9 @@ fn transport(parts: &Parts) -> Result<Option<Value>, String> {
             Ok(Some(t))
         }
         "xhttp" | "splithttp" => {
-            Err("Транспорт xhttp не поддерживается ядром sing-box".into())
+            Err(tr("Транспорт xhttp не поддерживается ядром sing-box", "The xhttp transport is not supported by sing-box").into())
         }
-        other => Err(format!("Неизвестный транспорт: {other}")),
+        other => Err(format!("{}: {other}", tr("Неизвестный транспорт", "Unknown transport"))),
     }
 }
 
@@ -247,7 +248,7 @@ fn finish(parts: Parts, outbound: Value, port: u16, udp_only: bool) -> Parsed {
 fn parse_vless(rest: &str) -> Result<Parsed, String> {
     let parts = split(rest)?;
     let port = port_num(&parts.port)?;
-    let uuid = parts.user.clone().ok_or("В ссылке vless нет UUID")?;
+    let uuid = parts.user.clone().ok_or(tr("В ссылке vless нет UUID", "The vless link has no UUID"))?;
     let mut ob = json!({
         "type": "vless",
         "server": parts.host,
@@ -270,7 +271,7 @@ fn parse_vless(rest: &str) -> Result<Parsed, String> {
 fn parse_trojan(rest: &str) -> Result<Parsed, String> {
     let parts = split(rest)?;
     let port = port_num(&parts.port)?;
-    let password = parts.user.clone().ok_or("В ссылке trojan нет пароля")?;
+    let password = parts.user.clone().ok_or(tr("В ссылке trojan нет пароля", "The trojan link has no password"))?;
     let mut ob = json!({
         "type": "trojan",
         "server": parts.host,
@@ -306,7 +307,7 @@ fn parse_hy2(rest: &str) -> Result<Parsed, String> {
             .first()
             .and_then(|r| r.split(':').next())
             .and_then(|p| p.parse().ok())
-            .ok_or("Неверный диапазон портов")?;
+            .ok_or(tr("Неверный диапазон портов", "Invalid port range"))?;
         ob["server_ports"] = json!(ranges
             .iter()
             .map(|r| if r.contains(':') { r.clone() } else { format!("{r}:{r}") })
@@ -351,11 +352,11 @@ fn parse_ss(rest: &str) -> Result<Parsed, String> {
         let creds = if user.contains(':') {
             user
         } else {
-            decode_b64(&user).ok_or("Не удалось прочитать данные Shadowsocks")?
+            decode_b64(&user).ok_or(tr("Не удалось прочитать данные Shadowsocks", "Could not read Shadowsocks data"))?
         };
         format!("{creds}@{hostport}")
     } else {
-        decode_b64(body).ok_or("Не удалось прочитать ссылку Shadowsocks")?
+        decode_b64(body).ok_or(tr("Не удалось прочитать ссылку Shadowsocks", "Could not read the Shadowsocks link"))?
     };
     let with_name = match name {
         Some(n) => format!("{full}#{n}"),
@@ -363,10 +364,10 @@ fn parse_ss(rest: &str) -> Result<Parsed, String> {
     };
     let parts = split(&with_name)?;
     let port = port_num(&parts.port)?;
-    let creds = parts.user.clone().ok_or("В ссылке ss нет метода и пароля")?;
+    let creds = parts.user.clone().ok_or(tr("В ссылке ss нет метода и пароля", "The ss link has no method and password"))?;
     let (method, password) = creds
         .split_once(':')
-        .ok_or("В ссылке ss нет метода шифрования")?;
+        .ok_or(tr("В ссылке ss нет метода шифрования", "The ss link has no encryption method"))?;
     let ob = json!({
         "type": "shadowsocks",
         "server": parts.host,

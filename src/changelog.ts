@@ -1,5 +1,7 @@
-// «Что нового»: разделы CHANGELOG.md, который Vite встраивает в сборку как текст.
-import text from "../CHANGELOG.md?raw";
+// «Что нового»: разделы CHANGELOG.md и CHANGELOG.en.md, которые Vite встраивает в сборку как текст.
+import ru from "../CHANGELOG.md?raw";
+import en from "../CHANGELOG.en.md?raw";
+import { getLang } from "./i18n";
 
 export interface Release { version: string; items: string[] }
 
@@ -23,14 +25,21 @@ export function parseItems(md: string): string[] {
   return items;
 }
 
-const releases: Release[] = text.replace(/\r/g, "").split(/^## /m).slice(1).map((chunk) => {
+const parse = (text: string): Release[] => text.replace(/\r/g, "").split(/^## /m).slice(1).map((chunk) => {
   const [head, ...rest] = chunk.split("\n");
   return { version: head.trim(), items: parseItems(rest.join("\n")) };
 });
+const releases = { ru: parse(ru), en: parse(en) };
 
-/** Версии новее `from` и не новее `to`, от новой к старой. */
+/** Версии новее `from` и не новее `to`, от новой к старой - на языке интерфейса. */
 export function releasesBetween(from: string, to: string): Release[] {
-  return releases.filter((r) => newer(r.version, from) && !newer(r.version, to));
+  return releases[getLang()].filter((r) => newer(r.version, from) && !newer(r.version, to));
+}
+
+/** Описание релиза на GitHub: сначала русский, после строки «**English**» - английский. */
+export function releaseNotes(body: string): string {
+  const [ruPart, enPart] = body.replace(/\r/g, "").split(/^\*\*English\*\*\s*$/m);
+  return getLang() === "en" && enPart ? enPart : ruPart;
 }
 
 /** Строка из CHANGELOG.md в HTML: `код` и **жирный**. Текст экранируется. */

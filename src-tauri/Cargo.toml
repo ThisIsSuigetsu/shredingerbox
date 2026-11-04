@@ -1,6 +1,6 @@
 [package]
 name = "shredingerbox"
-version = "0.7.0"
+version = "0.8.0"
 description = "ShredingerBox - простой VPN-клиент на sing-box"
 edition = "2021"
 license = "GPL-3.0-or-later"

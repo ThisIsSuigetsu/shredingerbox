@@ -1,6 +1,7 @@
 //! Запуск и остановка ядра sing-box (sidecar), сбор его логов.
 
 use crate::config::{self, CoreParams};
+use crate::i18n::tr;
 use crate::links;
 use crate::settings::{Mode, Settings};
 use crate::system;
@@ -91,7 +92,7 @@ impl Core {
     pub fn write_config(&self, settings: &Settings, data_dir: &Path) -> Result<String, String> {
         let server = settings
             .selected_server()
-            .ok_or("Сначала добавь сервер или подписку")?;
+            .ok_or(tr("Сначала добавь сервер или подписку", "Add a server or a subscription first"))?;
         // В конфиг идут все серверы: так их можно переключать и пинговать без перезапуска.
         // Сломанная ссылка у невыбранного сервера просто пропускается.
         let mut outbounds = vec![];
@@ -119,7 +120,7 @@ impl Core {
         self.stop();
 
         if settings.mode == Mode::Tun && !crate::settings::TUN_AVAILABLE {
-            return Err("Режим TUN пока есть только в Windows - включи «Прокси»".into());
+            return Err(tr("Режим TUN недоступен на этой системе - включи «Прокси»", "TUN mode is not available on this system - switch to Proxy").into());
         }
         if settings.mode == Mode::Tun && !system::is_elevated() {
             return Err("NEED_ADMIN".into());
@@ -145,14 +146,14 @@ impl Core {
         let check = app
             .shell()
             .sidecar("sing-box")
-            .map_err(|e| format!("Не найдено ядро sing-box: {e}"))?
+            .map_err(|e| format!("{}: {e}", tr("Не найдено ядро sing-box", "sing-box core not found")))?
             .args(["check", "--disable-color", "-c", cfg_path.as_str(), "-D", dir.as_str()])
             .output()
             .await
-            .map_err(|e| format!("Не удалось запустить ядро: {e}"))?;
+            .map_err(|e| format!("{}: {e}", tr("Не удалось запустить ядро", "Could not start the core")))?;
         if !check.status.success() {
             let err = String::from_utf8_lossy(&check.stderr);
-            return Err(format!("Ядро отклонило конфиг: {}", err.trim()));
+            return Err(format!("{}: {}", tr("Ядро отклонило конфиг", "The core rejected the config"), err.trim()));
         }
 
         // macOS: TUN требует root - запускаем ядро через системное окно пароля.
@@ -170,10 +171,10 @@ impl Core {
         let (mut rx, child) = app
             .shell()
             .sidecar("sing-box")
-            .map_err(|e| format!("Не найдено ядро sing-box: {e}"))?
+            .map_err(|e| format!("{}: {e}", tr("Не найдено ядро sing-box", "sing-box core not found")))?
             .args(["run", "--disable-color", "-c", cfg_path.as_str(), "-D", dir.as_str()])
             .spawn()
-            .map_err(|e| format!("Не удалось запустить ядро: {e}"))?;
+            .map_err(|e| format!("{}: {e}", tr("Не удалось запустить ядро", "Could not start the core")))?;
 
         let gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         *self.child.lock().unwrap() = Some(child);
@@ -280,7 +281,7 @@ mod mac_tun {
     /// Возвращает, когда ядро стартовало, или ошибку, если пароль не ввели.
     pub async fn spawn(cfg: &str, data_dir: &Path) -> Result<Child, String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let sing_box = exe.parent().ok_or("Не найдена папка программы")?.join("sing-box");
+        let sing_box = exe.parent().ok_or(crate::i18n::tr("Не найдена папка программы", "Program folder not found"))?.join("sing-box");
         // У ядра от root своя рабочая папка: его cache.db принадлежит root,
         // и ядро в режиме «Прокси» (от пользователя) не смогло бы его открыть.
         let work = data_dir.join("tun");
@@ -308,7 +309,7 @@ mod mac_tun {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| format!("Не удалось запросить права администратора: {e}"))?;
+            .map_err(|e| format!("{}: {e}", crate::i18n::tr("Не удалось запросить права администратора", "Could not request administrator rights")))?;
         // Ждём, пока введут пароль и ядро запишет свой pid, или пока osascript не завершится.
         for _ in 0..1500 {
             if pid.exists() {
@@ -320,17 +321,23 @@ mod mac_tun {
                     let _ = e.read_to_string(&mut err);
                 }
                 if err.contains("-128") {
-                    return Err("Подключение отменено: для TUN macOS спрашивает пароль администратора. \
-                                Без пароля работает режим «Прокси»."
-                        .into());
+                    return Err(crate::i18n::tr(
+                        "Подключение отменено: для TUN macOS спрашивает пароль администратора. Без пароля работает режим «Прокси».",
+                        "Connection cancelled: macOS asks for the administrator password for TUN. Proxy mode works without it.",
+                    )
+                    .into());
                 }
                 let last = std::fs::read_to_string(&log).unwrap_or_default();
                 let last = last.lines().last().unwrap_or(err.trim()).to_string();
-                return Err(format!("Ядро не запустилось: {last}"));
+                return Err(format!("{}: {last}", crate::i18n::tr("Ядро не запустилось", "The core did not start")));
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
-        Err("Пароль администратора так и не ввели - подключение отменено".into())
+        Err(crate::i18n::tr(
+            "Пароль администратора так и не ввели - подключение отменено",
+            "The administrator password was not entered - connection cancelled",
+        )
+        .into())
     }
 
     /// Читает tun.log для окна логов и замечает, когда ядро остановилось само.

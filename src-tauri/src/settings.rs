@@ -47,6 +47,9 @@ pub struct Server {
 pub struct Subscription {
     pub url: String,
     pub name: String,
+    /// Когда подписку последний раз обновили (секунды Unix) - для автообновления.
+    #[serde(default)]
+    pub updated: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -90,8 +93,33 @@ pub struct Advanced {
     pub mixed_port: u16,
     pub allow_lan: bool,
     pub log_level: String,
-    /// DNS-over-HTTPS сервер, через который резолвятся домены, идущие в VPN.
+    /// DNS-сервер, через который резолвятся домены, идущие в VPN.
     pub remote_dns: String,
+    /// Протокол этого DNS: «https», «tls» или «udp».
+    pub remote_dns_type: String,
+    /// DNS для сайтов напрямую: пусто - системный, иначе адрес UDP-сервера.
+    pub direct_dns: String,
+    /// «prefer_ipv4», «prefer_ipv6», «ipv4_only» или «ipv6_only».
+    pub dns_strategy: String,
+    /// Сетевой стек TUN: «mixed», «system» или «gvisor».
+    pub tun_stack: String,
+    pub tun_mtu: u32,
+    /// Весь трафик строго через TUN - другие программы не обойдут VPN.
+    pub tun_strict_route: bool,
+    pub tun_ipv6: bool,
+    /// Узнавать домен по содержимому соединения - нужно для правил по сайтам.
+    pub sniff: bool,
+    /// Локальная сеть (роутер, принтер, NAS) всегда напрямую.
+    pub bypass_lan: bool,
+    /// Запрет QUIC (UDP 443): браузеры переходят на TCP, который часто работает быстрее через VPN.
+    pub block_quic: bool,
+    /// IP-адреса и подсети (CIDR) через VPN и напрямую.
+    pub proxy_ips: Vec<String>,
+    pub direct_ips: Vec<String>,
+    /// Автообновление подписок раз в столько часов, 0 - выключено.
+    pub sub_update_hours: u32,
+    /// User-Agent при загрузке подписки; пусто - «ShredingerBox/версия».
+    pub sub_user_agent: String,
 }
 
 impl Default for Advanced {
@@ -102,22 +130,46 @@ impl Default for Advanced {
             allow_lan: false,
             log_level: "warn".into(),
             remote_dns: "1.1.1.1".into(),
+            remote_dns_type: "https".into(),
+            direct_dns: String::new(),
+            dns_strategy: "prefer_ipv4".into(),
+            tun_stack: "mixed".into(),
+            tun_mtu: 9000,
+            tun_strict_route: true,
+            tun_ipv6: true,
+            sniff: true,
+            bypass_lan: true,
+            block_quic: false,
+            proxy_ips: vec![],
+            direct_ips: vec![],
+            sub_update_hours: 0,
+            sub_user_agent: String::new(),
         }
     }
 }
 
-/// Напоминание о продлении подписки (20-го числа каждого месяца).
+/// Напоминание о продлении подписки раз в месяц.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Reminder {
     pub enabled: bool,
     /// Месяц последнего показа, например «2026-11», - чтобы напоминать раз в месяц.
     pub last_shown: Option<String>,
+    /// С какого числа месяца напоминать (1-28).
+    pub day: u8,
+    /// Свой текст напоминания; пусто - общий «Пора продлить подписку».
+    #[serde(default = "legacy_note")]
+    pub note: String,
+}
+
+/// До 0.8.0 напоминание было только для друзей: у них остаётся прежний текст.
+fn legacy_note() -> String {
+    "Напиши Suigetsu в Telegram, чтобы продлить подписку на VPN.".into()
 }
 
 impl Default for Reminder {
     fn default() -> Self {
-        Self { enabled: true, last_shown: None }
+        Self { enabled: false, last_shown: None, day: 20, note: String::new() }
     }
 }
 
@@ -135,6 +187,8 @@ pub struct General {
     pub check_updates: bool,
     /// «system», «dark» или «light».
     pub theme: String,
+    /// «system», «ru» или «en».
+    pub language: String,
 }
 
 impl Default for General {
@@ -145,6 +199,7 @@ impl Default for General {
             clipboard_offer: true,
             check_updates: true,
             theme: "system".into(),
+            language: "system".into(),
         }
     }
 }
@@ -191,5 +246,25 @@ impl Settings {
             .as_ref()
             .and_then(|id| self.servers.iter().find(|s| &s.id == id))
             .or_else(|| self.servers.first())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_reminder_keeps_friends_text_new_install_is_off() {
+        let old: Settings = serde_json::from_str(r#"{"reminder":{"enabled":true,"last_shown":null}}"#).unwrap();
+        assert!(old.reminder.enabled);
+        assert_eq!(old.reminder.day, 20);
+        assert!(old.reminder.note.contains("Suigetsu"));
+        let fresh = Settings::default();
+        assert!(!fresh.reminder.enabled);
+        assert!(fresh.reminder.note.is_empty());
+        assert_eq!(fresh.general.language, "system");
+        let old_adv: Settings = serde_json::from_str(r#"{"advanced":{"enabled":true,"mixed_port":3000}}"#).unwrap();
+        assert_eq!(old_adv.advanced.mixed_port, 3000);
+        assert!(old_adv.advanced.sniff && old_adv.advanced.bypass_lan);
     }
 }

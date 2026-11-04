@@ -58,8 +58,12 @@ jobs:
         shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
-          notes=$(tr -d '\r' < CHANGELOG.md | awk -v v="## $version" '$0==v{f=1;next} /^## /{f=0} f' | sed '/./,$!d')
+          section() { tr -d '\r' < "$1" | awk -v v="## $version" '$0==v{f=1;next} /^## /{f=0} f' | sed '/./,$!d'; }
+          notes=$(section CHANGELOG.md)
           [ -n "$notes" ] || notes="Обновление ShredingerBox ${GITHUB_REF_NAME}."
+          # Английский раздел - после строки **English**: клиент на английском показывает только его.
+          en=$(section CHANGELOG.en.md)
+          [ -z "$en" ] || notes=$(printf '%s\n\n**English**\n\n%s' "$notes" "$en")
           { echo "RELEASE_NOTES<<EOF_NOTES"; echo "$notes"; echo "EOF_NOTES"; } >> "$GITHUB_ENV"
 
       - uses: tauri-apps/tauri-action@v0

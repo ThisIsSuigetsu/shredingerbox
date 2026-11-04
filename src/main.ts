@@ -1,9 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { mascot, type Mood } from "./mascot";
-import { inline, parseItems, releasesBetween, type Release } from "./changelog";
+import { inline, parseItems, releaseNotes, releasesBetween, type Release } from "./changelog";
+import { t, setLang, resolveLang, locale, type LangSetting } from "./i18n";
 
 // ---------- типы (зеркало Rust-структур) ----------
 
@@ -12,22 +13,32 @@ type Theme = "system" | "dark" | "light";
 type FinalRoute = "proxy" | "direct";
 interface Server { id: string; name: string; link: string; subscription: string | null }
 interface AppRule { name: string; exe: string }
+interface Subscription { url: string; name: string; updated: number | null }
+interface Advanced {
+  enabled: boolean; mixed_port: number; allow_lan: boolean; log_level: string;
+  remote_dns: string; remote_dns_type: string; direct_dns: string; dns_strategy: string;
+  tun_stack: string; tun_mtu: number; tun_strict_route: boolean; tun_ipv6: boolean;
+  sniff: boolean; bypass_lan: boolean; block_quic: boolean; proxy_ips: string[]; direct_ips: string[];
+  sub_update_hours: number; sub_user_agent: string;
+}
 interface Settings {
   mode: Mode;
   servers: Server[];
-  subscriptions: { url: string; name: string }[];
+  subscriptions: Subscription[];
   selected: string | null;
   rules: { final_route: FinalRoute; proxy_apps: AppRule[]; direct_apps: AppRule[]; proxy_domains: string[]; direct_domains: string[]; presets: string[] };
-  advanced: { enabled: boolean; mixed_port: number; allow_lan: boolean; log_level: string; remote_dns: string };
-  reminder: { enabled: boolean; last_shown: string | null };
-  general: { autoconnect: boolean; close_to_tray: boolean; clipboard_offer: boolean; check_updates: boolean; theme: Theme };
+  advanced: Advanced;
+  reminder: { enabled: boolean; last_shown: string | null; day: number; note: string };
+  general: { autoconnect: boolean; close_to_tray: boolean; clipboard_offer: boolean; check_updates: boolean; theme: Theme; language: LangSetting };
   seen_version: string | null;
 }
 interface Status { running: boolean; mode: Mode; server: string | null; api_port: number; secret: string; elevated: boolean; windows: boolean; tun: boolean; portable: boolean }
 interface Preset { id: string; title: string; domains: string[] }
 interface Ping { id: string; ms: number | null; udp: boolean; via_vpn: boolean }
 interface Proc { name: string; exe: string }
+interface ServiceCheck { name: string; ok: boolean; ms: number | null; detail: string }
 type View = "main" | "servers" | "rules" | "settings";
+type AdvTab = "main" | "dns" | "tun" | "routing" | "subs";
 type AppList = "proxy_apps" | "direct_apps";
 type SiteList = "proxy_domains" | "direct_domains";
 interface Usage { up: number; down: number }
@@ -41,15 +52,18 @@ type Modal =
   | { kind: "clipboard"; text: string; busy: boolean; error: string }
   | { kind: "update"; version: string; current: string; notes: string; busy: boolean; progress: number; error: string }
   | { kind: "whatsnew"; releases: Release[] }
+  | { kind: "services"; busy: boolean; viaVpn: boolean; results: ServiceCheck[] }
   | { kind: "text"; title: string; text: string; live: boolean };
 
 // ---------- состояние ----------
 
 const st = {
   view: "main" as View,
+  advTab: "main" as AdvTab,
   settings: null as Settings | null,
   status: null as Status | null,
   presets: [] as Preset[],
+  defaults: null as Advanced | null,
   busy: false,
   pings: {} as Record<string, Ping>,
   connectedAt: 0,
@@ -66,12 +80,12 @@ const st = {
 
 /** Сколько строк показывать в списках правил - остальное в окне «Показать все». */
 const LIST_LIMIT = 10;
-const LIST_TITLE: Record<AppList | SiteList, string> = {
-  proxy_apps: "Приложения через VPN",
-  direct_apps: "Приложения напрямую",
-  proxy_domains: "Сайты через VPN",
-  direct_domains: "Сайты напрямую",
-};
+const listTitle = (list: AppList | SiteList) => ({
+  proxy_apps: t("Приложения через VPN"),
+  direct_apps: t("Приложения напрямую"),
+  proxy_domains: t("Сайты через VPN"),
+  direct_domains: t("Сайты напрямую"),
+})[list];
 
 const root = document.getElementById("app")!;
 /** Версия из package.json - Vite подставляет её при сборке. */
@@ -96,8 +110,8 @@ const icon = {
   x: (s = 14) => `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>`,
   refresh: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.6-4.5L4 8M4 4v4h4M4 13a8 8 0 0 0 14.6 4.5L20 16M20 20v-4h-4"/></svg>`,
   info: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" style="flex-shrink:0;margin-top:1px"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>`,
-  down: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" style="color:var(--accent-ink)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Загрузка"><path d="M12 5v14M6 13l6 6 6-6"/></svg>`,
-  up: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" style="color:var(--blue)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Отдача"><path d="M12 19V5M6 11l6-6 6 6"/></svg>`,
+  down: () => `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" style="color:var(--accent-ink)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="${t("Загрузка")}"><path d="M12 5v14M6 13l6 6 6-6"/></svg>`,
+  up: () => `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" style="color:var(--blue)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="${t("Отдача")}"><path d="M12 19V5M6 11l6-6 6 6"/></svg>`,
 };
 
 /** «🇳🇱 Нидерланды» → { code: "NL", name: "Нидерланды" } */
@@ -115,42 +129,47 @@ function splitFlag(name: string): { code: string; name: string } {
 function pingView(id: string): string {
   const p = st.pings[id];
   if (!p) return "";
-  if (p.udp) return `<span class="ping muted" title="Hysteria2 работает по UDP - TCP-пинг не меряется">UDP</span>`;
-  if (p.ms == null) return `<span class="ping" style="color:var(--danger)">нет ответа</span>`;
+  if (p.udp) return `<span class="ping muted" title="${t("Hysteria2 работает по UDP - TCP-пинг не меряется")}">UDP</span>`;
+  if (p.ms == null) return `<span class="ping" style="color:var(--danger)">${t("нет ответа")}</span>`;
   const good = p.via_vpn ? 300 : 120;
   const color = p.ms <= good ? "var(--accent-ink)" : p.ms <= good * 2.5 ? "var(--amber)" : "var(--danger)";
-  const title = p.via_vpn ? "Реальная задержка через VPN" : "TCP-подключение к серверу";
-  return `<span class="ping" style="color:${color}" title="${title}">${p.ms} мс</span>`;
+  const title = p.via_vpn ? t("Реальная задержка через VPN") : t("TCP-подключение к серверу");
+  return `<span class="ping" style="color:${color}" title="${title}">${t("{n} мс", { n: p.ms })}</span>`;
 }
 
+const num = (n: number) => n.toLocaleString(locale(), { maximumFractionDigits: 1 });
+
 function speed(bytes: number): string {
-  const f = (n: number) => n.toLocaleString("ru-RU", { maximumFractionDigits: 1 });
-  if (bytes >= 1024 * 1024) return `${f(bytes / 1024 / 1024)} МБ/с`;
-  return `${f(bytes / 1024)} КБ/с`;
+  if (bytes >= 1024 * 1024) return t("{n} МБ/с", { n: num(bytes / 1024 / 1024) });
+  return t("{n} КБ/с", { n: num(bytes / 1024) });
 }
 
 function bytes(n: number): string {
-  const f = (x: number) => x.toLocaleString("ru-RU", { maximumFractionDigits: 1 });
-  if (n >= 1024 ** 3) return `${f(n / 1024 ** 3)} ГБ`;
-  if (n >= 1024 ** 2) return `${f(n / 1024 ** 2)} МБ`;
-  return `${f(n / 1024)} КБ`;
+  if (n >= 1024 ** 3) return t("{n} ГБ", { n: num(n / 1024 ** 3) });
+  if (n >= 1024 ** 2) return t("{n} МБ", { n: num(n / 1024 ** 2) });
+  return t("{n} КБ", { n: num(n / 1024) });
 }
 
-const MONTHS = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"];
-/** «2026-11» → «ноябрь» */
-const monthName = (month: string) => MONTHS[Number(month.slice(5, 7)) - 1] ?? "месяц";
+/** «2026-11» → «ноябрь» / «November» */
+function monthName(month: string): string {
+  const m = Number(month.slice(5, 7));
+  if (!m) return t("месяц");
+  return new Date(2000, m - 1, 1).toLocaleString(locale(), { month: "long" });
+}
 
 /** Расход сервера за месяц: короткий текст и подсказка с разбивкой. Пусто, если трафика не было. */
 function usageOf(id: string): { short: string; title: string } {
   const u = st.usage.servers[id];
   if (!u || u.up + u.down === 0) return { short: "", title: "" };
-  return { short: bytes(u.up + u.down), title: `За ${monthName(st.usage.month)}: ↓ ${bytes(u.down)} · ↑ ${bytes(u.up)}` };
+  return { short: bytes(u.up + u.down), title: t("За {m}: ↓ {down} · ↑ {up}", { m: monthName(st.usage.month), down: bytes(u.down), up: bytes(u.up) }) };
 }
 
 function usageView(id: string): string {
   const u = usageOf(id);
   return `<span class="usage" data-usage-id="${esc(id)}" title="${esc(u.title)}">${esc(u.short)}</span>`;
 }
+
+const usageLong = (short: string) => (short ? t(" · {v} за {m}", { v: short, m: monthName(st.usage.month) }) : "");
 
 function elapsed(): string {
   const s = Math.max(0, Math.floor((Date.now() - st.connectedAt) / 1000));
@@ -171,6 +190,9 @@ function selected(): Server | undefined {
   const s = st.settings!;
   return s.servers.find((x) => x.id === s.selected) ?? s.servers[0];
 }
+
+/** Имя подписки: стандартное «Подписка» показываем на языке интерфейса. */
+const subName = (sub: Subscription) => (sub.name === "Подписка" || sub.name === "Subscription" ? t("Подписка") : sub.name);
 
 /** «C:\\Games\\Steam\\steam» → «steam.exe»; мусор → null */
 function normalizeExe(line: string): string | null {
@@ -228,8 +250,19 @@ function siteStats(m: { list: SiteList; text: string }): { add: string[]; dup: n
 }
 
 function statsText(x: { add: string[]; dup: number }): string {
-  if (!x.add.length && !x.dup) return "Список пуст";
-  return `Будет добавлено: ${x.add.length}` + (x.dup ? ` · дубликатов пропущено: ${x.dup}` : "");
+  if (!x.add.length && !x.dup) return t("Список пуст");
+  return t("Будет добавлено: {n}", { n: x.add.length }) + (x.dup ? t(" · дубликатов пропущено: {n}", { n: x.dup }) : "");
+}
+
+const addLabel = (n: number) => t("Добавить") + (n ? " · " + n : "");
+
+// ---------- язык ----------
+
+/** Язык из настроек («как в системе» - по языку Windows / macOS), и Rust переводит ошибки и трей. */
+function applyLanguage() {
+  const lang = resolveLang(st.settings?.general.language ?? "system");
+  setLang(lang);
+  invoke("set_language", { english: lang === "en" }).catch(() => {});
 }
 
 // ---------- обновления ----------
@@ -242,7 +275,7 @@ async function checkUpdate(manual = false) {
   if (!manual && (!st.settings?.general.check_updates || st.modal)) return;
   try {
     const info = await invoke<UpdateInfo | null>("check_update");
-    if (!info) { if (manual) toast("У тебя последняя версия"); return; }
+    if (!info) { if (manual) toast(t("У тебя последняя версия")); return; }
     if (!manual && info.version === updateSnoozed) return;
     if (st.modal && !manual) return;
     st.modal = { kind: "update", version: info.version, current: info.current, notes: info.notes ?? "", busy: false, progress: 0, error: "" };
@@ -274,7 +307,7 @@ async function checkClipboard() {
 /** «2 ключа» / «подписка с panel.example.org» - коротко, без самих секретов. */
 function clipboardSummary(text: string): string {
   if (/^https?:\/\//i.test(text)) {
-    try { return `подписка с <span class="mono">${esc(new URL(text).host)}</span>`; } catch { return "подписка"; }
+    try { return t("подписка с {host}", { host: `<span class="mono">${esc(new URL(text).host)}</span>` }); } catch { return t("подписка"); }
   }
   const lines = text.split("\n").filter(Boolean);
   const names = lines.slice(0, 3).map((l) => {
@@ -282,8 +315,8 @@ function clipboardSummary(text: string): string {
     const name = hash >= 0 ? decodeURIComponent(l.slice(hash + 1)) : l.split("://")[0] + "://…";
     return `<li>${esc(name)}</li>`;
   }).join("");
-  const more = lines.length > 3 ? `<li class="muted">и ещё ${lines.length - 3}</li>` : "";
-  return `${lines.length === 1 ? "ключ" : `ключи (${lines.length})`}:<ul style="margin:6px 0 0;padding-left:18px">${names}${more}</ul>`;
+  const more = lines.length > 3 ? `<li class="muted">${t("и ещё {n}", { n: lines.length - 3 })}</li>` : "";
+  return `${lines.length === 1 ? t("ключ") : t("ключи ({n})", { n: lines.length })}:<ul style="margin:6px 0 0;padding-left:18px">${names}${more}</ul>`;
 }
 
 // ---------- работа с Rust ----------
@@ -361,7 +394,7 @@ async function refreshUsage() {
   });
   document.querySelectorAll<HTMLElement>("[data-usage-long]").forEach((el) => {
     const u = usageOf(el.dataset.usageLong!);
-    el.textContent = u.short ? ` · ${u.short} за ${monthName(st.usage.month)}` : "";
+    el.textContent = usageLong(u.short);
     el.title = u.title;
   });
 }
@@ -411,6 +444,32 @@ async function pingAll() {
   }
 }
 
+async function checkServices() {
+  st.modal = { kind: "services", busy: true, viaVpn: !!st.status?.running, results: st.modal?.kind === "services" ? st.modal.results : [] };
+  render();
+  try {
+    const results = await invoke<ServiceCheck[]>("check_services");
+    if (st.modal?.kind === "services") { st.modal.results = results; st.modal.busy = false; }
+  } catch (e) {
+    if (st.modal?.kind === "services") st.modal.busy = false;
+    toast(errText(e), true);
+  }
+  render();
+}
+
+/** Автообновление подписок раз в N часов (продвинутый режим → «Подписки»). Ошибки молчат. */
+let subsUpdating = false;
+async function autoUpdateSubs() {
+  const s = st.settings;
+  const hours = s?.advanced.sub_update_hours ?? 0;
+  if (!s || !hours || !s.subscriptions.length || subsUpdating) return;
+  const now = Date.now() / 1000;
+  if (!s.subscriptions.some((sub) => !sub.updated || now - sub.updated >= hours * 3600)) return;
+  subsUpdating = true;
+  try { st.settings = await invoke<Settings>("refresh_subscriptions"); render(); } catch { /* попробуем позже */ }
+  subsUpdating = false;
+}
+
 // ---------- отрисовка ----------
 
 function sidebar(): string {
@@ -418,15 +477,15 @@ function sidebar(): string {
   const nav = (v: View, label: string, ic: string) =>
     `<button class="nav-btn ${st.view === v ? "active" : ""}" data-action="nav" data-view="${v}">${ic}${label}</button>`;
   const sub = s.subscriptions.length
-    ? `<div class="sub-card"><div class="t"><b>Подписка</b><span>${s.servers.filter((x) => x.subscription).length} серв.</span></div>
-       <button class="x-btn" data-action="refresh-subs" aria-label="Обновить подписку" title="Обновить подписку">${icon.refresh}</button></div>`
+    ? `<div class="sub-card"><div class="t"><b>${t("Подписка")}</b><span>${t("{n} серв.", { n: s.servers.filter((x) => x.subscription).length })}</span></div>
+       <button class="x-btn" data-action="refresh-subs" aria-label="${t("Обновить подписку")}" title="${t("Обновить подписку")}">${icon.refresh}</button></div>`
     : "";
-  return `<nav class="side" aria-label="Разделы">
+  return `<nav class="side" aria-label="${t("Разделы")}">
     <div class="brand">${mascot(36, mood())}<span>ShredingerBox</span></div>
-    ${nav("main", "Главная", icon.power())}
-    ${nav("servers", "Серверы", icon.globe)}
-    ${nav("rules", "Правила", icon.rules)}
-    ${nav("settings", "Настройки", icon.gear)}
+    ${nav("main", t("Главная"), icon.power())}
+    ${nav("servers", t("Серверы"), icon.globe)}
+    ${nav("rules", t("Правила"), icon.rules)}
+    ${nav("settings", t("Настройки"), icon.gear)}
     <div class="spacer"></div>
     ${sub}
     <span class="version">v${APP_VERSION}</span>
@@ -435,11 +494,13 @@ function sidebar(): string {
 
 function titlebar(): string {
   return `<div class="titlebar" data-tauri-drag-region>
-    <button class="win-btn" data-action="win-min" aria-label="Свернуть"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 12h16"/></svg></button>
-    <button class="win-btn" data-action="win-max" aria-label="Развернуть"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/></svg></button>
-    <button class="win-btn close" data-action="win-close" aria-label="Закрыть">${icon.x(12)}</button>
+    <button class="win-btn" data-action="win-min" aria-label="${t("Свернуть")}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 12h16"/></svg></button>
+    <button class="win-btn" data-action="win-max" aria-label="${t("Развернуть")}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/></svg></button>
+    <button class="win-btn close" data-action="win-close" aria-label="${t("Закрыть")}">${icon.x(12)}</button>
   </div>`;
 }
+
+const keysHint = () => t("Серверов пока нет. Вставь ключ {a}, {b} или ссылку на подписку.", { a: `<span class="mono">vless://</span>`, b: `<span class="mono">hy2://</span>` });
 
 function mainView(): string {
   const s = st.settings!;
@@ -447,33 +508,33 @@ function mainView(): string {
   const srv = selected();
   const flag = srv ? splitFlag(srv.name) : null;
   const powerCls = st.busy ? "busy" : running ? "on" : "";
-  const title = st.busy ? (running ? "Отключаемся…" : "Подключаемся…") : running
-    ? `Подключено <span class="timer" id="timer">· ${elapsed()}</span>`
-    : "Не подключено";
+  const title = st.busy ? (running ? t("Отключаемся…") : t("Подключаемся…")) : running
+    ? `${t("Подключено")} <span class="timer" id="timer">· ${elapsed()}</span>`
+    : t("Не подключено");
   const month = srv ? usageOf(srv.id) : null;
   const sub = srv
     ? `<span class="flag">${esc(flag!.code)}</span>${esc(flag!.name)}${st.pings[srv.id] ? " · " + pingView(srv.id) : ""}
-       <span data-usage-long="${esc(srv.id)}" title="${esc(month!.title)}">${month!.short ? ` · ${esc(month!.short)} за ${monthName(st.usage.month)}` : ""}</span>`
-    : `Добавь сервер, чтобы подключиться`;
+       <span data-usage-long="${esc(srv.id)}" title="${esc(month!.title)}">${esc(usageLong(month!.short))}</span>`
+    : t("Добавь сервер, чтобы подключиться");
 
   const servers = s.servers.length
     ? s.servers.map((x) => {
         const f = splitFlag(x.name);
         return `<div class="server ${x.id === srv?.id ? "on" : ""}" role="button" tabindex="0" data-action="select-server" data-id="${x.id}">
           <span class="flag">${esc(f.code)}</span><span class="name" title="${esc(x.name)}">${esc(f.name)}</span>${pingView(x.id)}
-          <button class="del" data-action="remove-server" data-id="${x.id}" aria-label="Удалить сервер">${icon.x(13)}</button>
+          <button class="del" data-action="remove-server" data-id="${x.id}" aria-label="${t("Удалить сервер")}">${icon.x(13)}</button>
         </div>`;
       }).join("")
-    : `<div class="empty">Серверов пока нет. Вставь ключ <span class="mono">vless://</span>, <span class="mono">hy2://</span> или ссылку на подписку.</div>`;
+    : `<div class="empty">${keysHint()}</div>`;
 
   const windows = st.status?.windows ?? true;
-  const modeOpt = (m: Mode, t: string, d: string, off = false) =>
+  const modeOpt = (m: Mode, title: string, d: string, off = false) =>
     `<button class="mode-opt ${s.mode === m ? "on" : ""}" data-action="set-mode" data-mode="${m}" aria-pressed="${s.mode === m}" ${off ? "disabled" : ""}>
-      <span class="radio"></span><span><b>${t}</b><span>${d}</span></span></button>`;
+      <span class="radio"></span><span><b>${title}</b><span>${d}</span></span></button>`;
 
   return `<div class="home">
     <div class="home-center">
-      <button class="power ${powerCls}" data-action="toggle-connect" aria-label="${running ? "Отключиться" : "Подключиться"}">
+      <button class="power ${powerCls}" data-action="toggle-connect" aria-label="${running ? t("Отключиться") : t("Подключиться")}">
         <span class="inner">${icon.power(68)}</span>
       </button>
       <div style="display:flex;flex-direction:column;gap:10px">
@@ -481,22 +542,24 @@ function mainView(): string {
         <div class="status-sub">${sub}</div>
       </div>
       ${running ? `<div class="speeds">
-        <div class="speed">${icon.down}<span id="spd-down">${speed(st.traffic.down)}</span></div>
-        <div class="speed">${icon.up}<span id="spd-up">${speed(st.traffic.up)}</span></div>
+        <div class="speed">${icon.down()}<span id="spd-down">${speed(st.traffic.down)}</span></div>
+        <div class="speed">${icon.up()}<span id="spd-up">${speed(st.traffic.up)}</span></div>
       </div>` : ""}
     </div>
     <div class="home-side">
       <section class="card">
-        <h2>Режим</h2>
-        ${!(st.status?.tun ?? true) ? modeOpt("tun", "TUN", "Пока недоступно на этой системе", true)
-          : windows ? modeOpt("tun", "TUN", "Весь трафик системы по правилам")
-          : modeOpt("tun", "TUN", "Весь трафик · пароль администратора при подключении")}
-        ${modeOpt("proxy", "Прокси", "Только программы с системным прокси")}
+        <h2>${t("Режим")}</h2>
+        ${!(st.status?.tun ?? true) ? modeOpt("tun", "TUN", t("Пока недоступно на этой системе"), true)
+          : windows ? modeOpt("tun", "TUN", t("Весь трафик системы по правилам"))
+          : modeOpt("tun", "TUN", t("Весь трафик · пароль администратора при подключении"))}
+        ${modeOpt("proxy", t("Прокси"), t("Только программы с системным прокси"))}
       </section>
       <section class="card servers">
-        <div class="card-head"><h2>Серверы</h2>${s.servers.length ? `<button class="link-btn" data-action="ping">Проверить пинг</button>` : ""}</div>
+        <div class="card-head"><h2>${t("Серверы")}</h2>${s.servers.length ? `<div style="display:flex;gap:12px">
+          <button class="link-btn" data-action="check-services">${t("Сервисы")}</button>
+          <button class="link-btn" data-action="ping">${t("Проверить пинг")}</button></div>` : ""}</div>
         <div class="server-list">${servers}</div>
-        <button class="dashed" data-action="open-add-server">${icon.plus}Добавить подписку или ключ</button>
+        <button class="dashed" data-action="open-add-server">${icon.plus}${t("Добавить подписку или ключ")}</button>
       </section>
     </div>
   </div>`;
@@ -506,44 +569,45 @@ function serverRow(x: Server, current: Server | undefined): string {
   const f = splitFlag(x.name);
   return `<div class="server ${x.id === current?.id ? "on" : ""}" role="button" tabindex="0" data-action="select-server" data-id="${x.id}">
     <span class="flag">${esc(f.code)}</span><span class="name" title="${esc(x.name)}">${esc(f.name)}</span>${usageView(x.id)}${pingView(x.id)}
-    <button class="del" data-action="remove-server" data-id="${x.id}" aria-label="Удалить сервер">${icon.x(13)}</button>
+    <button class="del" data-action="remove-server" data-id="${x.id}" aria-label="${t("Удалить сервер")}">${icon.x(13)}</button>
   </div>`;
 }
+
+const host = (url: string) => { try { return new URL(url).host; } catch { return url; } };
 
 function serversView(): string {
   const s = st.settings!;
   const current = selected();
-  const host = (url: string) => { try { return new URL(url).host; } catch { return url; } };
   const groups = s.subscriptions.map((sub) => {
     const list = s.servers.filter((x) => x.subscription === sub.url);
     return `<section class="card">
       <div class="card-head">
         <div style="display:flex;flex-direction:column;gap:2px;min-width:0">
-          <h2>${esc(sub.name)} <span class="count">· ${list.length}</span></h2>
+          <h2>${esc(subName(sub))} <span class="count">· ${list.length}</span></h2>
           <span class="muted mono" style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(host(sub.url))}</span>
         </div>
         <div style="display:flex;gap:4px">
-          <button class="x-btn" data-action="refresh-subs" aria-label="Обновить подписку" title="Обновить">${icon.refresh}</button>
-          <button class="x-btn" data-action="remove-sub" data-url="${esc(sub.url)}" aria-label="Удалить подписку" title="Удалить подписку">${icon.x()}</button>
+          <button class="x-btn" data-action="refresh-subs" aria-label="${t("Обновить подписку")}" title="${t("Обновить")}">${icon.refresh}</button>
+          <button class="x-btn" data-action="remove-sub" data-url="${esc(sub.url)}" aria-label="${t("Удалить подписку")}" title="${t("Удалить подписку")}">${icon.x()}</button>
         </div>
       </div>
-      <div class="server-list" style="max-height:none">${list.map((x) => serverRow(x, current)).join("") || `<div class="empty">В подписке нет серверов</div>`}</div>
+      <div class="server-list" style="max-height:none">${list.map((x) => serverRow(x, current)).join("") || `<div class="empty">${t("В подписке нет серверов")}</div>`}</div>
     </section>`;
   }).join("");
   const manual = s.servers.filter((x) => !x.subscription);
   const manualCard = manual.length
-    ? `<section class="card"><div class="card-head"><h2>Добавленные вручную <span class="count">· ${manual.length}</span></h2></div>
+    ? `<section class="card"><div class="card-head"><h2>${t("Добавленные вручную")} <span class="count">· ${manual.length}</span></h2></div>
         <div class="server-list" style="max-height:none">${manual.map((x) => serverRow(x, current)).join("")}</div></section>`
     : "";
   const empty = !s.servers.length
-    ? `<section class="card"><div class="empty">Серверов пока нет. Вставь ключ или ссылку на подписку.</div></section>`
+    ? `<section class="card"><div class="empty">${t("Серверов пока нет. Вставь ключ или ссылку на подписку.")}</div></section>`
     : "";
   return `<div class="page-head">
-      <div><h1>Серверы</h1><p>Подписки и ключи. Пока VPN включён, пинг каждого сервера меряется через туннель, а переключение мгновенное.
-        Рядом с сервером - расход трафика за ${monthName(st.usage.month || "0000-00")}, наведи, чтобы увидеть загрузку и отдачу.</p></div>
+      <div><h1>${t("Серверы")}</h1><p>${t("Подписки и ключи. Пока VPN включён, пинг каждого сервера меряется через туннель, а переключение мгновенное.")}
+        ${t("Рядом с сервером - расход трафика за {m}, наведи, чтобы увидеть загрузку и отдачу.", { m: monthName(st.usage.month || "0000-00") })}</p></div>
       <div style="display:flex;gap:8px">
-        ${s.servers.length ? `<button class="btn-ghost" data-action="ping">Проверить пинг</button>` : ""}
-        <button class="btn-light" data-action="open-add-server">Добавить</button>
+        ${s.servers.length ? `<button class="btn-ghost" data-action="ping">${t("Проверить пинг")}</button>` : ""}
+        <button class="btn-light" data-action="open-add-server">${t("Добавить")}</button>
       </div>
     </div>
     <div class="settings" style="max-width:none">${empty}${groups}${manualCard}</div>`;
@@ -559,13 +623,13 @@ function ruleRows(list: AppList | SiteList, filter = "", limit = Infinity): stri
         .filter((a) => !q || a.name.toLowerCase().includes(q) || a.exe.toLowerCase().includes(q))
         .map((a) => `<div class="app-row"><div class="app-icon">${esc(a.name.charAt(0).toUpperCase())}</div>
           <span class="n">${esc(a.name)} <small>· ${esc(a.exe)}</small></span>
-          <button class="x-btn" data-action="remove-app" data-list="${list}" data-exe="${esc(a.exe)}" aria-label="Убрать ${esc(a.name)} из списка">${icon.x()}</button></div>`)
+          <button class="x-btn" data-action="remove-app" data-list="${list}" data-exe="${esc(a.exe)}" aria-label="${esc(t("Убрать {name} из списка", { name: a.name }))}">${icon.x()}</button></div>`)
     : st.settings!.rules[list]
         .filter((d) => !q || d.includes(q))
         .map((d) => `<div class="app-row"><div class="app-icon">${esc(d.charAt(0).toUpperCase())}</div>
           <span class="n">${esc(d)}</span>
-          <button class="x-btn" data-action="remove-domain" data-list="${list}" data-domain="${esc(d)}" aria-label="Убрать ${esc(d)} из списка">${icon.x()}</button></div>`);
-  if (!rows.length) return `<div class="empty" style="padding:6px 0">${q ? "Ничего не нашлось" : "Пока пусто"}</div>`;
+          <button class="x-btn" data-action="remove-domain" data-list="${list}" data-domain="${esc(d)}" aria-label="${esc(t("Убрать {name} из списка", { name: d }))}">${icon.x()}</button></div>`);
+  if (!rows.length) return `<div class="empty" style="padding:6px 0">${q ? t("Ничего не нашлось") : t("Пока пусто")}</div>`;
   return rows.slice(0, limit).join("");
 }
 
@@ -573,16 +637,16 @@ function ruleRows(list: AppList | SiteList, filter = "", limit = Infinity): stri
 function ruleList(list: AppList | SiteList): string {
   const total = st.settings!.rules[list].length;
   const more = total > LIST_LIMIT
-    ? `<button class="link-btn more" data-action="show-list" data-list="${list}">Показать все (${total})</button>`
+    ? `<button class="link-btn more" data-action="show-list" data-list="${list}">${t("Показать все ({n})", { n: total })}</button>`
     : "";
   return ruleRows(list, "", LIST_LIMIT) + more;
 }
 
 function appCard(list: AppList, hollow: boolean): string {
   return `<section class="card" style="gap:2px">
-    <div class="card-head" style="padding-bottom:6px"><div style="display:flex;align-items:center;gap:10px"><span class="dot ${hollow ? "hollow" : ""}"></span><h2>${LIST_TITLE[list]}</h2></div><span class="count">${st.settings!.rules[list].length}</span></div>
+    <div class="card-head" style="padding-bottom:6px"><div style="display:flex;align-items:center;gap:10px"><span class="dot ${hollow ? "hollow" : ""}"></span><h2>${listTitle(list)}</h2></div><span class="count">${st.settings!.rules[list].length}</span></div>
     ${ruleList(list)}
-    <button class="dashed" style="margin-top:6px" data-action="open-add-app" data-list="${list}">${icon.plus}Добавить приложение</button>
+    <button class="dashed" style="margin-top:6px" data-action="open-add-app" data-list="${list}">${icon.plus}${t("Добавить приложение")}</button>
   </section>`;
 }
 
@@ -596,211 +660,310 @@ function rulesView(): string {
     return `<button class="preset ${on ? "on" : ""}" data-action="toggle-preset" data-id="${p.id}" aria-pressed="${on}" title="${esc(p.domains.join(", "))}">${on ? "✓ " : ""}${esc(p.title)}</button>`;
   }).join("");
   return `<div class="page-head">
-      <div><h1>Правила</h1><p>Что идёт через VPN, а что напрямую</p></div>
-      <div style="display:flex;align-items:center;gap:12px"><span class="muted" style="font-size:13px">Остальной трафик</span>
-        <div class="seg" role="group" aria-label="Остальной трафик">
-          <button class="${r.final_route === "proxy" ? "on" : ""}" data-action="set-final" data-value="proxy">Через VPN</button>
-          <button class="${r.final_route === "direct" ? "on" : ""}" data-action="set-final" data-value="direct">Напрямую</button>
+      <div><h1>${t("Правила")}</h1><p>${t("Что идёт через VPN, а что напрямую")}</p></div>
+      <div style="display:flex;align-items:center;gap:12px"><span class="muted" style="font-size:13px">${t("Остальной трафик")}</span>
+        <div class="seg" role="group" aria-label="${t("Остальной трафик")}">
+          <button class="${r.final_route === "proxy" ? "on" : ""}" data-action="set-final" data-value="proxy">${t("Через VPN")}</button>
+          <button class="${r.final_route === "direct" ? "on" : ""}" data-action="set-final" data-value="direct">${t("Напрямую")}</button>
         </div></div>
     </div>
     <div class="rules-grid">
       <div class="col">${appCard("proxy_apps", false)}${appCard("direct_apps", true)}</div>
       <div class="col"><section class="card" style="gap:2px">
-        <div class="card-head" style="padding-bottom:8px"><div style="display:flex;align-items:center;gap:10px"><span class="dot ${tab === "direct_domains" ? "hollow" : ""}"></span><h2>Сайты</h2></div>
-          <div class="seg inset" role="tablist" aria-label="Какие сайты">${siteTab("proxy_domains", "Через VPN")}${siteTab("direct_domains", "Напрямую")}</div></div>
+        <div class="card-head" style="padding-bottom:8px"><div style="display:flex;align-items:center;gap:10px"><span class="dot ${tab === "direct_domains" ? "hollow" : ""}"></span><h2>${t("Сайты")}</h2></div>
+          <div class="seg inset" role="tablist" aria-label="${t("Какие сайты")}">${siteTab("proxy_domains", t("Через VPN"))}${siteTab("direct_domains", t("Напрямую"))}</div></div>
         ${ruleList(tab)}
-        <button class="dashed" style="margin-top:6px" data-action="open-add-sites">${icon.plus}Добавить сайты</button>
+        <button class="dashed" style="margin-top:6px" data-action="open-add-sites">${icon.plus}${t("Добавить сайты")}</button>
         ${tab === "proxy_domains"
           ? `<div class="sep" style="margin:12px 0"></div>
-            <span class="muted" style="font-size:12px;padding-bottom:8px">Готовые наборы - нажми, чтобы включить</span>
+            <span class="muted" style="font-size:12px;padding-bottom:8px">${t("Готовые наборы - нажми, чтобы включить")}</span>
             <div class="chips">${presets}</div>`
-          : `<div class="hint" style="margin-top:12px">${icon.info}<span>Эти сайты всегда идут напрямую - даже из приложений «через VPN» и готовых наборов. Удобно для банков и госуслуг.</span></div>`}
-        <div class="hint" style="margin-top:12px">${icon.info}<span>В режиме «Прокси» правила для приложений работают только у программ, которые используют системный прокси. В режиме TUN - у всех.</span></div>
+          : `<div class="hint" style="margin-top:12px">${icon.info}<span>${t("Эти сайты всегда идут напрямую - даже из приложений «через VPN» и готовых наборов. Удобно для банков и госуслуг.")}</span></div>`}
+        <div class="hint" style="margin-top:12px">${icon.info}<span>${t("В режиме «Прокси» правила для приложений работают только у программ, которые используют системный прокси. В режиме TUN - у всех.")}</span></div>
       </section></div>
     </div>`;
 }
 
-function settingsView(): string {
+// ---------- настройки ----------
+
+const sw = (on: boolean, action: string, label: string, busy = false) =>
+  `<button class="switch ${on ? "on" : ""}" role="switch" aria-checked="${on}" aria-label="${esc(label)}" data-action="${action}" ${busy ? "disabled" : ""}><span></span></button>`;
+
+/** Строка настройки: заголовок, пояснение и элемент управления справа. */
+const row = (title: string, desc: string, control: string, forId = "") =>
+  `<div class="set-row"><div class="t">${forId ? `<label for="${forId}"><b>${title}</b></label>` : `<b>${title}</b>`}<span>${desc}</span></div>${control}</div>`;
+
+/** Переключатель продвинутого режима: data-adv - имя поля в settings.advanced. */
+const advSwitch = (field: keyof Advanced, title: string, desc: string) => {
+  const on = !!st.settings!.advanced[field];
+  return row(title, desc, `<button class="switch ${on ? "on" : ""}" role="switch" aria-checked="${on}" aria-label="${esc(title)}" data-action="adv-toggle" data-field="${field}"><span></span></button>`);
+};
+
+const select = (id: string, change: string, value: string, options: [string, string][], field = "") =>
+  `<select id="${id}" class="field" data-change="${change}" ${field ? `data-field="${field}"` : ""}>${options.map(([v, l]) => `<option value="${esc(v)}" ${v === value ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
+
+function advancedTab(): string {
   const a = st.settings!.advanced;
-  const head = `<div class="page-head"><h1>Настройки</h1>
-    <div class="adv-toggle">Продвинутый режим
-      <button class="switch ${a.enabled ? "on" : ""}" role="switch" aria-checked="${a.enabled}" aria-label="Продвинутый режим" data-action="toggle-advanced"><span></span></button>
-    </div></div>`;
-  const g = st.settings!.general;
-  const sw = (on: boolean, action: string, label: string, busy = false) =>
-    `<button class="switch ${on ? "on" : ""}" role="switch" aria-checked="${on}" aria-label="${label}" data-action="${action}" ${busy ? "disabled" : ""}><span></span></button>`;
+  const card = (body: string) => `<section class="card" style="gap:0;padding:6px 16px">${body}</section>`;
+  const hint = (text: string) => `<div class="hint">${icon.info}<span>${text}</span></div>`;
+  switch (st.advTab) {
+    case "dns":
+      return card(
+        row(t("DNS для VPN-трафика"), t("Через него узнаются адреса сайтов, которые идут через VPN"),
+          `<div style="display:flex;gap:8px">${select("dns-type", "adv-dns-type", a.remote_dns_type, [["https", "DoH"], ["tls", "DoT"], ["udp", "UDP"]])}
+           <input id="dns" class="field mono" data-change="adv-text" data-field="remote_dns" value="${esc(a.remote_dns)}" placeholder="1.1.1.1" /></div>`, "dns")
+        + row(t("DNS для сайтов напрямую"), t("Пусто - системный DNS. Можно указать свой, например 77.88.8.8"),
+          `<input id="direct-dns" class="field mono" data-change="adv-text" data-field="direct_dns" value="${esc(a.direct_dns)}" placeholder="${t("системный")}" />`, "direct-dns")
+        + row(t("IPv4 и IPv6"), t("Какие адреса просить у DNS"),
+          select("dns-strategy", "adv-select", a.dns_strategy, [["prefer_ipv4", t("Сначала IPv4")], ["prefer_ipv6", t("Сначала IPv6")], ["ipv4_only", t("Только IPv4")], ["ipv6_only", t("Только IPv6")]], "dns_strategy"), "dns-strategy"),
+      ) + hint(t("Адрес можно указать со схемой: {a}, {b} или {c}.", { a: `<span class="mono">https://dns.google/dns-query</span>`, b: `<span class="mono">tls://1.1.1.1</span>`, c: `<span class="mono">8.8.8.8:53</span>` }));
+    case "tun":
+      return card(
+        row(t("Сетевой стек"), t("«mixed» подходит почти всем. «system» быстрее, «gvisor» совместимее"),
+          select("tun-stack", "adv-select", a.tun_stack, [["mixed", "mixed"], ["system", "system"], ["gvisor", "gvisor"]], "tun_stack"), "tun-stack")
+        + row("MTU", t("Размер пакета. Стандарт - 9000, при проблемах попробуй 1500"),
+          `<input id="tun-mtu" class="field mono" type="number" min="1280" max="65535" data-change="adv-number" data-field="tun_mtu" value="${a.tun_mtu}" />`, "tun-mtu")
+        + advSwitch("tun_strict_route", t("Строгая маршрутизация"), t("Программы не смогут обойти VPN. Выключи, если не работает локальная сеть или другой VPN"))
+        + advSwitch("tun_ipv6", "IPv6", t("Пускать IPv6-трафик через TUN")),
+      ) + hint(t("Настройки TUN применяются в режиме TUN. Если VPN включён, он переподключится сам."));
+    case "routing":
+      return card(
+        advSwitch("sniff", t("Определять сайт по соединению"), t("Нужно для правил по сайтам и наборов. Выключай, только если что-то ломается"))
+        + advSwitch("bypass_lan", t("Локальная сеть напрямую"), t("Роутер, принтер, NAS и другие устройства дома - мимо VPN"))
+        + advSwitch("block_quic", t("Блокировать QUIC"), t("Браузеры перейдут на обычный HTTPS - через VPN он часто быстрее, например в YouTube")),
+      ) + `<section class="card">
+        <h2>${t("IP-адреса и подсети")}</h2>
+        <p class="muted" style="margin:0;font-size:13px;line-height:1.5">${t("По одному на строку: {a} или {b}. Работает для программ, которые подключаются по IP.", { a: `<span class="mono">1.2.3.4</span>`, b: `<span class="mono">10.0.0.0/8</span>` })}</p>
+        <div class="rules-grid" style="gap:12px">
+          <div class="col"><label for="proxy-ips" class="muted" style="font-size:13px">${t("Через VPN")}</label>
+            <textarea id="proxy-ips" class="field mono" style="height:120px" data-change="adv-list" data-field="proxy_ips" spellcheck="false">${esc(a.proxy_ips.join("\n"))}</textarea></div>
+          <div class="col"><label for="direct-ips" class="muted" style="font-size:13px">${t("Напрямую")}</label>
+            <textarea id="direct-ips" class="field mono" style="height:120px" data-change="adv-list" data-field="direct_ips" spellcheck="false">${esc(a.direct_ips.join("\n"))}</textarea></div>
+        </div>
+      </section>`;
+    case "subs": {
+      const s = st.settings!;
+      const fmt = (sec: number | null) => (sec ? new Date(sec * 1000).toLocaleString(locale(), { dateStyle: "short", timeStyle: "short" }) : t("ещё не обновлялась"));
+      const subs = s.subscriptions.map((sub, i) => `<div class="set-row"><div class="t" style="min-width:0">
+          <input id="sub-${i}" class="field" style="width:100%;max-width:260px" data-change="sub-name" data-url="${esc(sub.url)}" value="${esc(subName(sub))}" aria-label="${t("Название подписки")}" />
+          <span class="mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(host(sub.url))} · ${esc(fmt(sub.updated))}</span></div>
+          <button class="x-btn" data-action="refresh-subs" aria-label="${t("Обновить подписку")}" title="${t("Обновить")}">${icon.refresh}</button></div>`).join("");
+      return card(
+        row(t("Обновлять подписки"), t("Список серверов подтягивается сам, пока клиент запущен"),
+          select("sub-hours", "adv-number", String(a.sub_update_hours), [["0", t("Вручную")], ["6", t("Каждые 6 часов")], ["12", t("Каждые 12 часов")], ["24", t("Раз в сутки")], ["72", t("Раз в 3 дня")]], "sub_update_hours"), "sub-hours")
+        + row("User-Agent", t("Некоторые панели отдают разный список для разных клиентов. Пусто - «ShredingerBox/версия»"),
+          `<input id="sub-ua" class="field mono" data-change="adv-text" data-field="sub_user_agent" value="${esc(a.sub_user_agent)}" placeholder="ShredingerBox/${esc(APP_VERSION)}" />`, "sub-ua"),
+      ) + (subs ? card(subs) : `<section class="card"><div class="empty">${t("Подписок пока нет")}</div></section>`);
+    }
+    default:
+      return `<section class="card">
+        <h2>${t("Ядро")}</h2>
+        <div class="core on" style="cursor:default"><b>sing-box</b><span>${t("Встроенное ядро: VLESS (Reality, Vision, ws, grpc), Hysteria2, Trojan, Shadowsocks · TUN и правила")}</span></div>
+      </section>` + card(
+        row(t("Локальный порт прокси"), t("HTTP + SOCKS5 на одном порту"),
+          `<input id="port" class="field mono" data-change="port" type="number" min="1024" max="65535" value="${a.mixed_port}" />`, "port")
+        + row(t("Подключения из локальной сети"), t("Чтобы телефон или ТВ ходили через этот ПК"), sw(a.allow_lan, "toggle-lan", t("Подключения из локальной сети")))
+        + row(t("Уровень логов"), t("Подробные логи пригодятся, когда что-то сломалось"),
+          `<select id="log" class="field" data-change="log">${["error", "warn", "info", "debug"].map((l) => `<option ${l === a.log_level ? "selected" : ""}>${l}</option>`).join("")}</select>`, "log"),
+      );
+  }
+}
+
+function settingsView(): string {
+  const s = st.settings!;
+  const a = s.advanced;
+  const g = s.general;
   const windows = st.status?.windows ?? true;
+  const head = `<div class="page-head"><h1>${t("Настройки")}</h1>
+    <div class="adv-toggle">${t("Продвинутый режим")}${sw(a.enabled, "toggle-advanced", t("Продвинутый режим"))}</div></div>`;
+  const seg = (label: string, action: string, value: string, options: [string, string][]) =>
+    `<div class="seg inset" role="group" aria-label="${esc(label)}">${options
+      .map(([v, l]) => `<button class="${value === v ? "on" : ""}" aria-pressed="${value === v}" data-action="${action}" data-value="${v}">${l}</button>`).join("")}</div>`;
   const behaviour = `<section class="card" style="gap:0;padding:6px 16px">
-      ${windows ? `<div class="set-row"><div class="t"><b>Запускать вместе с Windows</b><span>Сразу с правами администратора - TUN без окна UAC</span></div>
-        ${sw(st.autostart, "toggle-autostart", "Запускать вместе с Windows", st.autostartBusy)}</div>
-      <div class="set-row"><div class="t"><b>Подключаться при автозапуске</b><span>Клиент стартует в трее и сразу включает VPN</span></div>
-        ${sw(g.autoconnect, "toggle-autoconnect", "Подключаться при автозапуске")}</div>` : ""}
-      <div class="set-row"><div class="t"><b>Проверять обновления</b><span>Версия ${esc(APP_VERSION)}${st.status?.portable ? " · portable" : ""} · новые версии приходят с GitHub</span></div>
-        <button class="btn-ghost" data-action="check-update-now" style="height:36px">Проверить</button>
-        ${sw(g.check_updates, "toggle-updates", "Проверять обновления")}</div>
-      <div class="set-row"><div class="t"><b>Предлагать ключи из буфера обмена</b><span>Скопировал ключ или подписку - открыл клиент - он предложит добавить</span></div>
-        ${sw(g.clipboard_offer, "toggle-clipboard", "Предлагать ключи из буфера обмена")}</div>
-      <div class="set-row"><div class="t"><b>Тема</b><span>«Как в системе» - светлая или тёмная вслед за ${windows ? "Windows" : "macOS"}</span></div>
-        <div class="seg inset" role="group" aria-label="Тема">${([["system", "Как в системе"], ["dark", "Тёмная"], ["light", "Светлая"]] as [Theme, string][])
-          .map(([v, l]) => `<button class="${g.theme === v ? "on" : ""}" aria-pressed="${g.theme === v}" data-action="set-theme" data-value="${v}">${l}</button>`).join("")}</div></div>
-      <div class="set-row"><div class="t"><b>Сворачивать в трей при закрытии</b><span>Крестик прячет окно, VPN продолжает работать</span></div>
-        ${sw(g.close_to_tray, "toggle-tray", "Сворачивать в трей при закрытии")}</div>
+      ${windows ? row(t("Запускать вместе с Windows"), t("Сразу с правами администратора - TUN без окна UAC"), sw(st.autostart, "toggle-autostart", t("Запускать вместе с Windows"), st.autostartBusy))
+        + row(t("Подключаться при автозапуске"), t("Клиент стартует в трее и сразу включает VPN"), sw(g.autoconnect, "toggle-autoconnect", t("Подключаться при автозапуске"))) : ""}
+      ${row(t("Проверять обновления"), t("Версия {v} · новые версии приходят с GitHub", { v: esc(APP_VERSION) + (st.status?.portable ? " · portable" : "") }),
+        `<button class="btn-ghost" data-action="check-update-now" style="height:36px">${t("Проверить")}</button>${sw(g.check_updates, "toggle-updates", t("Проверять обновления"))}`)}
+      ${row(t("Предлагать ключи из буфера обмена"), t("Скопировал ключ или подписку - открыл клиент - он предложит добавить"), sw(g.clipboard_offer, "toggle-clipboard", t("Предлагать ключи из буфера обмена")))}
+      ${row(t("Язык"), t("«Как в системе» - по языку {os}", { os: windows ? "Windows" : "macOS" }),
+        seg(t("Язык"), "set-language", g.language, [["system", t("Как в системе")], ["ru", "Русский"], ["en", "English"]]))}
+      ${row(t("Тема"), t("«Как в системе» - светлая или тёмная вслед за {os}", { os: windows ? "Windows" : "macOS" }),
+        seg(t("Тема"), "set-theme", g.theme, [["system", t("Как в системе")], ["dark", t("Тёмная")], ["light", t("Светлая")]]))}
+      ${row(t("Сворачивать в трей при закрытии"), t("Крестик прячет окно, VPN продолжает работать"), sw(g.close_to_tray, "toggle-tray", t("Сворачивать в трей при закрытии")))}
     </section>`;
-  const basic = behaviour + `<section class="card" style="gap:0;padding:6px 16px">
-      ${windows ? `<div class="set-row"><div class="t"><b>Права администратора</b><span>Нужны для режима TUN</span></div>
-        ${st.status?.elevated ? `<span style="color:var(--accent-ink);font-size:13px;font-weight:600">Есть</span>` : `<button class="btn-ghost" data-action="restart-admin">Перезапустить с правами</button>`}</div>` : ""}
-      <div class="set-row"><div class="t"><b>Папка данных</b><span>Настройки, конфиг и кэш ядра</span></div>
-        <button class="btn-ghost" data-action="open-data-dir">Открыть</button></div>
-      <div class="set-row"><div class="t"><b>Напоминание о продлении подписки</b><span>Каждое 20-е число - написать Suigetsu в Telegram</span></div>
-        <button class="switch ${st.settings!.reminder.enabled ? "on" : ""}" role="switch" aria-checked="${st.settings!.reminder.enabled}" aria-label="Напоминание о продлении подписки" data-action="toggle-reminder"><span></span></button></div>
+  const r = s.reminder;
+  const reminder = `<section class="card" style="gap:0;padding:6px 16px">
+      ${row(t("Напоминание о продлении подписки"), t("Раз в месяц покажет окно, чтобы не забыть продлить VPN"), sw(r.enabled, "toggle-reminder", t("Напоминание о продлении подписки")))}
+      ${r.enabled ? row(t("С какого числа"), t("Окно появится в этот день или позже, если компьютер был выключен"),
+          `<select id="rem-day" class="field" data-change="reminder-day">${Array.from({ length: 28 }, (_, i) => i + 1).map((d) => `<option value="${d}" ${d === r.day ? "selected" : ""}>${d}</option>`).join("")}</select>`, "rem-day")
+        + row(t("Текст напоминания"), t("Например, кому написать или где оплатить. Пусто - общий текст"),
+          `<input id="rem-note" class="field" style="width:280px" data-change="reminder-note" value="${esc(r.note)}" placeholder="${t("Пора продлить подписку на VPN.")}" />`, "rem-note") : ""}
     </section>`;
+  const system = `<section class="card" style="gap:0;padding:6px 16px">
+      ${windows ? row(t("Права администратора"), t("Нужны для режима TUN"), st.status?.elevated
+        ? `<span style="color:var(--accent-ink);font-size:13px;font-weight:600">${t("Есть")}</span>`
+        : `<button class="btn-ghost" data-action="restart-admin">${t("Перезапустить с правами")}</button>`) : ""}
+      ${row(t("Перенос настроек"), t("Серверы, подписки и правила в одном файле. В нём твои ключи - не выкладывай его"),
+        `<div style="display:flex;gap:8px"><button class="btn-ghost" data-action="export-settings">${t("Экспорт")}</button><button class="btn-ghost" data-action="import-settings">${t("Импорт")}</button></div>`)}
+      ${row(t("Папка данных"), t("Настройки, конфиг и кэш ядра"), `<button class="btn-ghost" data-action="open-data-dir">${t("Открыть")}</button>`)}
+    </section>`;
+  const basic = behaviour + reminder + system;
   if (!a.enabled) return `<div class="settings">${head}${basic}</div>`;
+  const tab = (v: AdvTab, label: string) =>
+    `<button role="tab" aria-selected="${st.advTab === v}" class="${st.advTab === v ? "on" : ""}" data-action="adv-tab" data-tab="${v}">${label}</button>`;
   return `<div class="settings">${head}
-    <section class="card">
-      <h2>Ядро</h2>
-      <div class="core on" style="cursor:default"><b>sing-box</b><span>Встроенное ядро: VLESS (Reality, Vision, ws, grpc), Hysteria2, Trojan, Shadowsocks · TUN и правила</span></div>
-    </section>
-    <section class="card" style="gap:0;padding:6px 16px">
-      <div class="set-row"><div class="t"><label for="port"><b>Локальный порт прокси</b></label><span>HTTP + SOCKS5 на одном порту</span></div>
-        <input id="port" class="field mono" data-change="port" type="number" min="1024" max="65535" value="${a.mixed_port}" /></div>
-      <div class="set-row"><div class="t"><b>Подключения из локальной сети</b><span>Чтобы телефон или ТВ ходили через этот ПК</span></div>
-        <button class="switch ${a.allow_lan ? "on" : ""}" role="switch" aria-checked="${a.allow_lan}" aria-label="Подключения из локальной сети" data-action="toggle-lan"><span></span></button></div>
-      <div class="set-row"><div class="t"><label for="dns"><b>DNS для VPN-трафика</b></label><span>DNS-over-HTTPS, адрес сервера</span></div>
-        <input id="dns" class="field mono" data-change="dns" value="${esc(a.remote_dns)}" /></div>
-      <div class="set-row"><div class="t"><label for="log"><b>Уровень логов</b></label><span>Подробные логи пригодятся, когда что-то сломалось</span></div>
-        <select id="log" class="field" data-change="log">${["error", "warn", "info", "debug"].map((l) => `<option ${l === a.log_level ? "selected" : ""}>${l}</option>`).join("")}</select></div>
-    </section>
-    ${basic}
-    <div class="actions">
-      <button class="btn-ghost" data-action="show-config">Открыть итоговый конфиг</button>
-      <button class="btn-ghost" data-action="show-logs">Открыть логи</button>
-      <span style="flex-grow:1"></span>
-      <button class="btn-ghost btn-danger" data-action="reset-advanced">Сбросить к стандартным</button>
+    <div class="seg inset" role="tablist" aria-label="${t("Разделы продвинутого режима")}" style="align-self:flex-start">
+      ${tab("main", t("Основное"))}${tab("dns", "DNS")}${tab("tun", "TUN")}${tab("routing", t("Маршрутизация"))}${tab("subs", t("Подписки"))}
     </div>
+    ${advancedTab()}
+    <div class="actions">
+      <button class="btn-ghost" data-action="show-config">${t("Открыть итоговый конфиг")}</button>
+      <button class="btn-ghost" data-action="show-logs">${t("Открыть логи")}</button>
+      <span style="flex-grow:1"></span>
+      <button class="btn-ghost btn-danger" data-action="reset-advanced">${t("Сбросить к стандартным")}</button>
+    </div>
+    <div class="sep"></div>
+    ${basic}
   </div>`;
 }
+
+// ---------- окна ----------
 
 function modalView(): string {
   const m = st.modal;
   if (!m) return "";
-  const head = (t: string) => `<div class="modal-head"><h1>${t}</h1><button class="x-btn" data-action="close-modal" aria-label="Закрыть">${icon.x(16)}</button></div>`;
+  const head = (title: string) => `<div class="modal-head"><h1>${title}</h1><button class="x-btn" data-action="close-modal" aria-label="${t("Закрыть")}">${icon.x(16)}</button></div>`;
+  const segTo = (action: string, current: string, a: string, b: string) => `<div class="seg inset" role="group" aria-label="${t("Куда добавить")}">
+      <button class="${current === a ? "on" : ""}" data-action="${action}" data-list="${a}">${t("Через VPN")}</button>
+      <button class="${current === b ? "on" : ""}" data-action="${action}" data-list="${b}">${t("Напрямую")}</button>
+    </div>`;
   let body = "";
   if (m.kind === "add-server") {
-    body = `<form class="modal" data-form="add-server">${head("Добавить сервер")}
+    body = `<form class="modal" data-form="add-server">${head(t("Добавить сервер"))}
       <div class="modal-body">
-        <label for="link" class="muted" style="font-size:13px">Ключ (vless://, hy2://, trojan://, ss://) или ссылка на подписку. Можно несколько строк.</label>
-        <textarea id="link" class="field mono" name="link" placeholder="vless://… или https://…/sub/…" autofocus></textarea>
+        <label for="link" class="muted" style="font-size:13px">${t("Ключ (vless://, hy2://, trojan://, ss://) или ссылка на подписку. Можно несколько строк.")}</label>
+        <textarea id="link" class="field mono" name="link" placeholder="vless://… ${t("или")} https://…/sub/…" autofocus></textarea>
         ${m.error ? `<div class="hint" style="color:var(--danger)">${esc(m.error)}</div>` : ""}
       </div>
-      <div class="modal-foot"><span class="grow"></span><button class="btn-accent" type="submit" ${m.busy ? "disabled" : ""}>${m.busy ? "Загружаю…" : "Добавить"}</button></div>
+      <div class="modal-foot"><span class="grow"></span><button class="btn-accent" type="submit" ${m.busy ? "disabled" : ""}>${m.busy ? t("Загружаю…") : t("Добавить")}</button></div>
     </form>`;
   } else if (m.kind === "add-app") {
     const existing = new Set(st.settings!.rules[m.list].map((a) => a.exe.toLowerCase()));
-    const tabs = `<div class="seg inset" role="tablist" aria-label="Способ добавления" style="align-self:flex-start">
-        <button role="tab" aria-selected="${m.tab === "running"}" class="${m.tab === "running" ? "on" : ""}" data-action="app-tab" data-tab="running">Запущенные</button>
-        <button role="tab" aria-selected="${m.tab === "manual"}" class="${m.tab === "manual" ? "on" : ""}" data-action="app-tab" data-tab="manual">Вписать вручную</button>
+    const tabs = `<div class="seg inset" role="tablist" aria-label="${t("Способ добавления")}" style="align-self:flex-start">
+        <button role="tab" aria-selected="${m.tab === "running"}" class="${m.tab === "running" ? "on" : ""}" data-action="app-tab" data-tab="running">${t("Запущенные")}</button>
+        <button role="tab" aria-selected="${m.tab === "manual"}" class="${m.tab === "manual" ? "on" : ""}" data-action="app-tab" data-tab="manual">${t("Вписать вручную")}</button>
       </div>`;
     let content: string;
     if (m.tab === "manual") {
-      content = `<label for="exe-list" class="muted" style="font-size:13px;line-height:1.5">По одному на строку: <span class="mono">Discord.exe</span>, просто <span class="mono">discord</span> или полный путь к файлу. Можно вставить сразу целый список.</label>
+      content = `<label for="exe-list" class="muted" style="font-size:13px;line-height:1.5">${t("По одному на строку: {a}, просто {b} или полный путь к файлу. Можно вставить сразу целый список.", { a: `<span class="mono">Discord.exe</span>`, b: `<span class="mono">discord</span>` })}</label>
         <textarea id="exe-list" class="field mono" style="height:180px" data-input="exe-list" placeholder="Discord.exe&#10;Telegram.exe&#10;chrome" spellcheck="false">${esc(m.text)}</textarea>
         <div class="muted" style="font-size:12px" id="exe-stats">${statsText(manualStats(m))}</div>`;
     } else {
       const all = [...m.manual, ...m.procs.filter((p) => !m.manual.some((x) => x.exe === p.exe))];
       const rows = m.loading
-        ? `<div class="empty">Ищу запущенные программы…</div>`
+        ? `<div class="empty">${t("Ищу запущенные программы…")}</div>`
         : all.length
           ? all.map((p, i) => {
               const added = existing.has(p.exe.toLowerCase());
               return `<label class="proc" for="p${i}"><div class="app-icon">${esc(p.name.charAt(0).toUpperCase())}</div>
-                <span class="n">${esc(p.name)} <small>· ${esc(p.exe)}${added ? " · уже в списке" : ""}</small></span>
+                <span class="n">${esc(p.name)} <small>· ${esc(p.exe)}${added ? " · " + t("уже в списке") : ""}</small></span>
                 <input id="p${i}" type="checkbox" data-change="pick" data-exe="${esc(p.exe)}" ${added || m.picked.has(p.exe) ? "checked" : ""} ${added ? "disabled" : ""} /></label>`;
             }).join("")
-          : `<div class="empty">Не нашлось программ с открытыми окнами. Выбери .exe или впиши вручную.</div>`;
+          : `<div class="empty">${t("Не нашлось программ с открытыми окнами. Выбери .exe или впиши вручную.")}</div>`;
       content = `<div style="display:flex;flex-direction:column;max-height:44vh;overflow:auto">${rows}</div>`;
     }
     const count = m.tab === "manual" ? manualStats(m).add.length : m.picked.size;
-    body = `<div class="modal" role="dialog" aria-label="Добавить приложение">${head("Добавить приложение")}
+    body = `<div class="modal" role="dialog" aria-label="${t("Добавить приложение")}">${head(t("Добавить приложение"))}
       <div class="modal-body">${tabs}${content}</div>
       <div class="modal-foot">
-        ${m.tab === "running" ? `<button class="btn-ghost" data-action="pick-exe">Выбрать .exe…</button>` : ""}
-        <div class="seg inset" role="group" aria-label="Куда добавить">
-          <button class="${m.list === "proxy_apps" ? "on" : ""}" data-action="set-app-list" data-list="proxy_apps">Через VPN</button>
-          <button class="${m.list === "direct_apps" ? "on" : ""}" data-action="set-app-list" data-list="direct_apps">Напрямую</button>
-        </div>
+        ${m.tab === "running" ? `<button class="btn-ghost" data-action="pick-exe">${t("Выбрать .exe…")}</button>` : ""}
+        ${segTo("set-app-list", m.list, "proxy_apps", "direct_apps")}
         <span class="grow"></span>
-        <button class="btn-accent" id="add-app-btn" data-action="confirm-add-app" ${count ? "" : "disabled"}>Добавить${count ? " · " + count : ""}</button>
+        <button class="btn-accent" id="add-app-btn" data-action="confirm-add-app" ${count ? "" : "disabled"}>${addLabel(count)}</button>
       </div></div>`;
   } else if (m.kind === "add-sites") {
     const count = siteStats(m).add.length;
-    body = `<div class="modal" role="dialog" aria-label="Добавить сайты">${head("Добавить сайты")}
+    body = `<div class="modal" role="dialog" aria-label="${t("Добавить сайты")}">${head(t("Добавить сайты"))}
       <div class="modal-body">
-        <label for="site-list" class="muted" style="font-size:13px;line-height:1.5">По одному на строку: <span class="mono">discord.com</span>, ссылка целиком или <span class="mono">*.example.com</span>. Поддомены попадают в правило сами. Можно вставить сразу целый список.</label>
+        <label for="site-list" class="muted" style="font-size:13px;line-height:1.5">${t("По одному на строку: {a}, ссылка целиком или {b}. Поддомены попадают в правило сами. Можно вставить сразу целый список.", { a: `<span class="mono">discord.com</span>`, b: `<span class="mono">*.example.com</span>` })}</label>
         <textarea id="site-list" class="field mono" style="height:180px" data-input="site-list" placeholder="discord.com&#10;https://www.youtube.com/&#10;*.example.com" spellcheck="false" autofocus>${esc(m.text)}</textarea>
         <div class="muted" style="font-size:12px" id="site-stats">${statsText(siteStats(m))}</div>
       </div>
       <div class="modal-foot">
-        <div class="seg inset" role="group" aria-label="Куда добавить">
-          <button class="${m.list === "proxy_domains" ? "on" : ""}" data-action="set-site-list" data-list="proxy_domains">Через VPN</button>
-          <button class="${m.list === "direct_domains" ? "on" : ""}" data-action="set-site-list" data-list="direct_domains">Напрямую</button>
-        </div>
+        ${segTo("set-site-list", m.list, "proxy_domains", "direct_domains")}
         <span class="grow"></span>
-        <button class="btn-accent" id="add-sites-btn" data-action="confirm-add-sites" ${count ? "" : "disabled"}>Добавить${count ? " · " + count : ""}</button>
+        <button class="btn-accent" id="add-sites-btn" data-action="confirm-add-sites" ${count ? "" : "disabled"}>${addLabel(count)}</button>
       </div></div>`;
   } else if (m.kind === "list") {
     const total = st.settings!.rules[m.list].length;
-    body = `<div class="modal" role="dialog" aria-label="${LIST_TITLE[m.list]}">${head(`${LIST_TITLE[m.list]} <span class="count">· ${total}</span>`)}
+    body = `<div class="modal" role="dialog" aria-label="${listTitle(m.list)}">${head(`${listTitle(m.list)} <span class="count">· ${total}</span>`)}
       <div class="modal-body">
-        <label for="list-filter" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">Поиск по списку</label>
-        <input id="list-filter" class="field" data-input="list-filter" placeholder="Поиск" value="${esc(m.filter)}" autocomplete="off" />
+        <label for="list-filter" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">${t("Поиск по списку")}</label>
+        <input id="list-filter" class="field" data-input="list-filter" placeholder="${t("Поиск")}" value="${esc(m.filter)}" autocomplete="off" />
         <div id="full-list" style="display:flex;flex-direction:column;max-height:52vh;overflow:auto">${ruleRows(m.list, m.filter)}</div>
       </div></div>`;
   } else if (m.kind === "update") {
     const portable = !!st.status?.portable;
-    const notes = parseItems(m.notes);
-    body = `<div class="modal" role="dialog" aria-label="Доступно обновление">${head(`Доступна версия ${esc(m.version)}`)}
+    const notes = parseItems(releaseNotes(m.notes));
+    body = `<div class="modal" role="dialog" aria-label="${t("Доступно обновление")}">${head(t("Доступна версия {v}", { v: esc(m.version) }))}
       <div class="modal-body">
-        <p class="muted" style="margin:0;font-size:13px">Сейчас установлена ${esc(m.current)}. ${portable
-          ? "Это portable-версия: откроется страница загрузки - скачай zip и распакуй поверх папки с программой, папка data останется."
-          : "Во время обновления VPN ненадолго отключится, потом клиент перезапустится сам."}</p>
-        ${notes.length ? `<b style="font-size:13px">Что нового</b><ul class="news">${notes.map((n) => `<li>${inline(n, esc)}</li>`).join("")}</ul>` : ""}
+        <p class="muted" style="margin:0;font-size:13px">${t("Сейчас установлена {v}.", { v: esc(m.current) })} ${portable
+          ? t("Это portable-версия: откроется страница загрузки - скачай zip и распакуй поверх папки с программой, папка data останется.")
+          : t("Во время обновления VPN ненадолго отключится, потом клиент перезапустится сам.")}</p>
+        ${notes.length ? `<b style="font-size:13px">${t("Что нового")}</b><ul class="news">${notes.map((n) => `<li>${inline(n, esc)}</li>`).join("")}</ul>` : ""}
         ${m.busy ? `<div style="height:6px;border-radius:3px;background:var(--chip);overflow:hidden"><div id="upd-bar" style="height:100%;width:${m.progress}%;background:var(--accent)"></div></div>` : ""}
         ${m.error ? `<div class="hint" style="color:var(--danger)">${esc(m.error)}</div>` : ""}
       </div>
-      <div class="modal-foot"><button class="btn-ghost" data-action="snooze-update" ${m.busy ? "disabled" : ""}>Позже</button><span class="grow"></span>
-        <button class="btn-accent" data-action="install-update" ${m.busy ? "disabled" : ""}>${m.busy ? "Обновляю…" : portable ? "Скачать" : "Обновить"}</button></div></div>`;
+      <div class="modal-foot"><button class="btn-ghost" data-action="snooze-update" ${m.busy ? "disabled" : ""}>${t("Позже")}</button><span class="grow"></span>
+        <button class="btn-accent" data-action="install-update" ${m.busy ? "disabled" : ""}>${m.busy ? t("Обновляю…") : portable ? t("Скачать") : t("Обновить")}</button></div></div>`;
   } else if (m.kind === "whatsnew") {
     const sections = m.releases.map((r) => `<div style="display:flex;flex-direction:column;gap:6px">
-        ${m.releases.length > 1 ? `<b style="font-size:13px">Версия ${esc(r.version)}</b>` : ""}
+        ${m.releases.length > 1 ? `<b style="font-size:13px">${t("Версия {v}", { v: esc(r.version) })}</b>` : ""}
         <ul class="news">${r.items.map((n) => `<li>${inline(n, esc)}</li>`).join("")}</ul></div>`).join("");
-    body = `<div class="modal" role="dialog" aria-label="Что нового">${head(`Что нового в ${esc(APP_VERSION)}`)}
+    body = `<div class="modal" role="dialog" aria-label="${t("Что нового")}">${head(t("Что нового в {v}", { v: esc(APP_VERSION) }))}
       <div class="modal-body" style="max-height:60vh">${sections}</div>
-      <div class="modal-foot"><span class="grow"></span><button class="btn-accent" data-action="close-modal">Понятно</button></div></div>`;
-  } else if (m.kind === "clipboard") {
-    body = `<div class="modal" role="dialog" aria-label="Добавить из буфера обмена">${head("Добавить из буфера обмена?")}
+      <div class="modal-foot"><span class="grow"></span><button class="btn-accent" data-action="close-modal">${t("Понятно")}</button></div></div>`;
+  } else if (m.kind === "services") {
+    const rows = m.results.length
+      ? m.results.map((r) => `<div class="app-row"><div class="app-icon" style="color:${r.ok ? "var(--accent-ink)" : "var(--danger)"}">${r.ok ? "✓" : "✕"}</div>
+          <span class="n">${esc(r.name)}</span>
+          <span class="ping" style="color:${r.ok ? "var(--accent-ink)" : "var(--danger)"}">${r.ok ? t("{n} мс", { n: r.ms ?? 0 }) : r.detail.startsWith("HTTP") ? t("недоступен") : esc(r.detail)}</span></div>`).join("")
+      : `<div class="empty">${t("Проверяю…")}</div>`;
+    body = `<div class="modal" role="dialog" aria-label="${t("Проверка сервисов")}">${head(t("Проверка сервисов"))}
       <div class="modal-body">
-        <div style="line-height:1.55">В буфере обмена есть ${clipboardSummary(m.text)}</div>
+        <p class="muted" style="margin:0;font-size:13px;line-height:1.5">${m.viaVpn
+          ? t("Через текущее подключение и твои правила - так же, как откроет браузер.")
+          : t("VPN выключен - проверка идёт напрямую. Подключись, чтобы проверить через VPN.")}</p>
+        <div style="display:flex;flex-direction:column">${rows}</div>
+      </div>
+      <div class="modal-foot"><span class="grow"></span>
+        <button class="btn-accent" data-action="check-services" ${m.busy ? "disabled" : ""}>${m.busy ? t("Проверяю…") : t("Проверить снова")}</button></div></div>`;
+  } else if (m.kind === "clipboard") {
+    body = `<div class="modal" role="dialog" aria-label="${t("Добавить из буфера обмена")}">${head(t("Добавить из буфера обмена?"))}
+      <div class="modal-body">
+        <div style="line-height:1.55">${t("В буфере обмена есть {what}", { what: clipboardSummary(m.text) })}</div>
         ${m.error ? `<div class="hint" style="color:var(--danger)">${esc(m.error)}</div>` : ""}
       </div>
-      <div class="modal-foot"><button class="btn-ghost" data-action="dismiss-clipboard">Не сейчас</button><span class="grow"></span>
-        <button class="btn-accent" data-action="accept-clipboard" ${m.busy ? "disabled" : ""}>${m.busy ? "Добавляю…" : "Добавить"}</button></div></div>`;
+      <div class="modal-foot"><button class="btn-ghost" data-action="dismiss-clipboard">${t("Не сейчас")}</button><span class="grow"></span>
+        <button class="btn-accent" data-action="accept-clipboard" ${m.busy ? "disabled" : ""}>${m.busy ? t("Добавляю…") : t("Добавить")}</button></div></div>`;
   } else if (m.kind === "reminder") {
-    body = `<div class="modal" role="dialog" aria-label="Пора продлить подписку">${head("Пора продлить подписку")}
+    const note = st.settings!.reminder.note.trim() || t("Пора продлить подписку на VPN.");
+    body = `<div class="modal" role="dialog" aria-label="${t("Пора продлить подписку")}">${head(t("Пора продлить подписку"))}
       <div class="modal-body" style="flex-direction:row;align-items:center;gap:16px">
         <div style="flex-shrink:0">${mascot(72, mood())}</div>
-        <p style="margin:0;line-height:1.55">Сегодня 20-е - напиши <b>Suigetsu</b> в Telegram, чтобы продлить подписку на VPN.</p>
+        <p style="margin:0;line-height:1.55">${esc(note)}</p>
       </div>
-      <div class="modal-foot"><button class="btn-ghost" data-action="reminder-disable">Больше не напоминать</button><span class="grow"></span>
-        <button class="btn-accent" data-action="close-modal">Понятно</button></div></div>`;
+      <div class="modal-foot"><button class="btn-ghost" data-action="reminder-disable">${t("Больше не напоминать")}</button><span class="grow"></span>
+        <button class="btn-accent" data-action="close-modal">${t("Понятно")}</button></div></div>`;
   } else if (m.kind === "admin") {
-    body = `<div class="modal" role="dialog" aria-label="Нужны права администратора">${head("Нужны права администратора")}
-      <div class="modal-body"><p style="margin:0;line-height:1.55">Режим TUN перехватывает весь трафик системы, поэтому Windows требует права администратора. ShredingerBox перезапустится и сразу подключится.</p>
-      <p class="muted" style="margin:0;font-size:13px">Или переключись на режим «Прокси» - ему права не нужны.</p></div>
-      <div class="modal-foot"><button class="btn-ghost" data-action="use-proxy-mode">Включить «Прокси»</button><span class="grow"></span>
-        <button class="btn-accent" data-action="restart-admin">Перезапустить</button></div></div>`;
+    body = `<div class="modal" role="dialog" aria-label="${t("Нужны права администратора")}">${head(t("Нужны права администратора"))}
+      <div class="modal-body"><p style="margin:0;line-height:1.55">${t("Режим TUN перехватывает весь трафик системы, поэтому Windows требует права администратора. ShredingerBox перезапустится и сразу подключится.")}</p>
+      <p class="muted" style="margin:0;font-size:13px">${t("Или переключись на режим «Прокси» - ему права не нужны.")}</p></div>
+      <div class="modal-foot"><button class="btn-ghost" data-action="use-proxy-mode">${t("Включить «Прокси»")}</button><span class="grow"></span>
+        <button class="btn-accent" data-action="restart-admin">${t("Перезапустить")}</button></div></div>`;
   } else if (m.kind === "text") {
     body = `<div class="modal wide" role="dialog" aria-label="${esc(m.title)}">${head(esc(m.title))}
-      <div class="modal-body"><pre class="code" id="text-pre">${esc(m.text || "Пусто")}</pre></div></div>`;
+      <div class="modal-body"><pre class="code" id="text-pre">${esc(m.text || t("Пусто"))}</pre></div></div>`;
   }
   return `<div class="overlay" data-action="overlay">${body}</div>`;
 }
@@ -810,8 +973,8 @@ lightQuery.addEventListener("change", () => applyTheme());
 
 /** Тема из настроек; «как в системе» - по светлой или тёмной теме Windows / macOS. */
 function applyTheme() {
-  const t = st.settings?.general.theme ?? "system";
-  document.documentElement.dataset.theme = t === "system" ? (lightQuery.matches ? "light" : "dark") : t;
+  const th = st.settings?.general.theme ?? "system";
+  document.documentElement.dataset.theme = th === "system" ? (lightQuery.matches ? "light" : "dark") : th;
 }
 
 function render() {
@@ -832,12 +995,12 @@ function render() {
 
 // ---------- напоминание о продлении ----------
 
-/** Раз в месяц, начиная с 20-го числа, выводит окно на передний план с напоминанием. */
+/** Раз в месяц, начиная с выбранного числа, выводит окно на передний план с напоминанием. */
 async function checkReminder() {
   const s = st.settings;
   if (!s || !s.reminder.enabled || st.modal) return;
   const now = new Date();
-  if (now.getDate() < 20) return;
+  if (now.getDate() < (s.reminder.day || 20)) return;
   const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
   if (s.reminder.last_shown === month) return;
   st.modal = { kind: "reminder" };
@@ -847,6 +1010,9 @@ async function checkReminder() {
 }
 
 // ---------- обработчики ----------
+
+const applied = () => t("Настройки применены");
+const rulesApplied = () => t("Правила применены");
 
 async function onAction(action: string, el: HTMLElement, ev: Event) {
   const s = st.settings!;
@@ -860,7 +1026,7 @@ async function onAction(action: string, el: HTMLElement, ev: Event) {
     case "set-mode": {
       const mode = el.dataset.mode as Mode;
       if (mode === s.mode) return;
-      return saveSettings((x) => { x.mode = mode; }, "Режим переключён");
+      return saveSettings((x) => { x.mode = mode; }, t("Режим переключён"));
     }
     case "select-server": {
       const id = el.dataset.id!;
@@ -869,7 +1035,7 @@ async function onAction(action: string, el: HTMLElement, ev: Event) {
       render();
       try {
         st.status = await invoke<Status>("select_server", { id });
-        if (st.status.running) { toast("Сервер переключён"); pingAll(); }
+        if (st.status.running) { toast(t("Сервер переключён")); pingAll(); }
       } catch (e) { toast(errText(e), true); await refreshStatus(); }
       return render();
     }
@@ -879,19 +1045,20 @@ async function onAction(action: string, el: HTMLElement, ev: Event) {
       return render();
     }
     case "ping": return pingAll();
+    case "check-services": return checkServices();
     case "open-add-server": st.modal = { kind: "add-server", busy: false, error: "" }; return render();
     case "refresh-subs": {
-      try { st.settings = await invoke<Settings>("refresh_subscriptions"); toast("Подписка обновлена"); } catch (e) { toast(errText(e), true); }
+      try { st.settings = await invoke<Settings>("refresh_subscriptions"); toast(t("Подписка обновлена")); } catch (e) { toast(errText(e), true); }
       return render();
     }
-    case "set-final": return saveSettings((x) => { x.rules.final_route = el.dataset.value as FinalRoute; }, "Правила применены");
+    case "set-final": return saveSettings((x) => { x.rules.final_route = el.dataset.value as FinalRoute; }, rulesApplied());
     case "remove-app": {
       const list = el.dataset.list as AppList;
-      return saveSettings((x) => { x.rules[list] = x.rules[list].filter((a) => a.exe !== el.dataset.exe); }, "Правила применены");
+      return saveSettings((x) => { x.rules[list] = x.rules[list].filter((a) => a.exe !== el.dataset.exe); }, rulesApplied());
     }
     case "remove-domain": {
       const list = el.dataset.list as SiteList;
-      return saveSettings((x) => { x.rules[list] = x.rules[list].filter((d) => d !== el.dataset.domain); }, "Правила применены");
+      return saveSettings((x) => { x.rules[list] = x.rules[list].filter((d) => d !== el.dataset.domain); }, rulesApplied());
     }
     case "site-tab": st.siteTab = el.dataset.list as SiteList; return render();
     case "show-list": st.modal = { kind: "list", list: el.dataset.list as AppList | SiteList, filter: "" }; render(); document.getElementById("list-filter")?.focus(); return;
@@ -901,7 +1068,7 @@ async function onAction(action: string, el: HTMLElement, ev: Event) {
       const m = st.modal;
       if (m?.kind !== "add-sites") return;
       const { add, dup } = siteStats(m);
-      if (!add.length) return toast("Нечего добавлять: всё уже есть в списке", true);
+      if (!add.length) return toast(t("Нечего добавлять: всё уже есть в списке"), true);
       const other: SiteList = m.list === "proxy_domains" ? "direct_domains" : "proxy_domains";
       st.modal = null;
       st.siteTab = m.list;
@@ -909,15 +1076,15 @@ async function onAction(action: string, el: HTMLElement, ev: Event) {
         // сайт не может быть одновременно в обоих списках
         x.rules[other] = x.rules[other].filter((d) => !add.includes(d));
         x.rules[m.list].push(...add);
-      }, "Правила применены");
-      if (dup) toast(`Добавлено: ${add.length}, дубликатов пропущено: ${dup}`);
+      }, rulesApplied());
+      if (dup) toast(t("Добавлено: {n}, дубликатов пропущено: {d}", { n: add.length, d: dup }));
       return;
     }
     case "toggle-preset": {
       const id = el.dataset.id!;
       return saveSettings((x) => {
         x.rules.presets = x.rules.presets.includes(id) ? x.rules.presets.filter((p) => p !== id) : [...x.rules.presets, id];
-      }, "Правила применены");
+      }, rulesApplied());
     }
     case "open-add-app": {
       const list = el.dataset.list as AppList;
@@ -930,7 +1097,7 @@ async function onAction(action: string, el: HTMLElement, ev: Event) {
     case "app-tab": if (st.modal?.kind === "add-app") { st.modal.tab = el.dataset.tab as "running" | "manual"; render(); document.getElementById("exe-list")?.focus(); } return;
     case "set-app-list": if (st.modal?.kind === "add-app") { st.modal.list = el.dataset.list as AppList; render(); } return;
     case "pick-exe": {
-      const file = await open({ multiple: false, filters: [{ name: "Программы", extensions: ["exe"] }] });
+      const file = await open({ multiple: false, filters: [{ name: t("Программы"), extensions: ["exe"] }] });
       if (typeof file === "string" && st.modal?.kind === "add-app") {
         const exe = file.split(/[\\/]/).pop()!;
         const name = exe.replace(/\.exe$/i, "");
@@ -953,7 +1120,7 @@ async function onAction(action: string, el: HTMLElement, ev: Event) {
         const pool = [...m.manual, ...m.procs];
         add = [...m.picked].map((exe) => pool.find((p) => p.exe === exe)!).filter(Boolean);
       }
-      if (!add.length) return toast("Нечего добавлять: всё уже есть в списке", true);
+      if (!add.length) return toast(t("Нечего добавлять: всё уже есть в списке"), true);
       const other: AppList = m.list === "proxy_apps" ? "direct_apps" : "proxy_apps";
       st.modal = null;
       await saveSettings((x) => {
@@ -962,25 +1129,28 @@ async function onAction(action: string, el: HTMLElement, ev: Event) {
           x.rules[other] = x.rules[other].filter((a) => a.exe.toLowerCase() !== p.exe.toLowerCase());
           if (!x.rules[m.list].some((a) => a.exe.toLowerCase() === p.exe.toLowerCase())) x.rules[m.list].push({ name: p.name, exe: p.exe });
         }
-      }, "Правила применены");
-      if (skipped) toast(`Добавлено: ${add.length}, дубликатов пропущено: ${skipped}`);
+      }, rulesApplied());
+      if (skipped) toast(t("Добавлено: {n}, дубликатов пропущено: {d}", { n: add.length, d: skipped }));
       return;
     }
     case "toggle-advanced": return saveSettings((x) => { x.advanced.enabled = !x.advanced.enabled; });
-    case "toggle-lan": return saveSettings((x) => { x.advanced.allow_lan = !x.advanced.allow_lan; }, "Настройки применены");
-    case "reset-advanced": return saveSettings((x) => {
-      x.advanced = { enabled: true, mixed_port: 2080, allow_lan: false, log_level: "warn", remote_dns: "1.1.1.1" };
-    }, "Настройки сброшены");
+    case "adv-tab": st.advTab = el.dataset.tab as AdvTab; return render();
+    case "adv-toggle": {
+      const field = el.dataset.field as keyof Advanced;
+      return saveSettings((x) => { (x.advanced as unknown as Record<string, boolean>)[field] = !x.advanced[field]; }, applied());
+    }
+    case "toggle-lan": return saveSettings((x) => { x.advanced.allow_lan = !x.advanced.allow_lan; }, applied());
+    case "reset-advanced": return saveSettings((x) => { x.advanced = structuredClone(st.defaults!); }, t("Настройки сброшены"));
     case "show-config": {
       try {
         const text = await invoke<string>("preview_config");
-        st.modal = { kind: "text", title: "Итоговый конфиг sing-box", text, live: false };
+        st.modal = { kind: "text", title: t("Итоговый конфиг sing-box"), text, live: false };
       } catch (e) { toast(errText(e), true); }
       return render();
     }
     case "show-logs": {
       st.logs = await invoke<string[]>("get_logs");
-      st.modal = { kind: "text", title: "Логи ядра", text: st.logs.join("\n"), live: true };
+      st.modal = { kind: "text", title: t("Логи ядра"), text: st.logs.join("\n"), live: true };
       return render();
     }
     case "open-data-dir": return invoke("open_data_dir").catch((e: unknown) => toast(errText(e), true));
@@ -991,7 +1161,7 @@ async function onAction(action: string, el: HTMLElement, ev: Event) {
       render();
       try {
         st.autostart = await invoke<boolean>("set_autostart", { enabled: !st.autostart });
-        toast(st.autostart ? "Автозапуск включён" : "Автозапуск выключен");
+        toast(st.autostart ? t("Автозапуск включён") : t("Автозапуск выключен"));
       } catch (e) { toast(errText(e), true); }
       st.autostartBusy = false;
       return render();
@@ -999,8 +1169,31 @@ async function onAction(action: string, el: HTMLElement, ev: Event) {
     case "toggle-autoconnect": return saveSettings((x) => { x.general.autoconnect = !x.general.autoconnect; });
     case "toggle-tray": return saveSettings((x) => { x.general.close_to_tray = !x.general.close_to_tray; });
     case "set-theme": return saveSettings((x) => { x.general.theme = el.dataset.value as Theme; });
+    case "set-language": {
+      await saveSettings((x) => { x.general.language = el.dataset.value as LangSetting; });
+      applyLanguage();
+      return render();
+    }
+    case "export-settings": {
+      const path = await save({ defaultPath: "shredingerbox-settings.json", filters: [{ name: "JSON", extensions: ["json"] }] });
+      if (!path) return;
+      try { await invoke("export_settings", { path }); toast(t("Настройки сохранены. В файле есть твои ключи - не выкладывай его")); } catch (e) { toast(errText(e), true); }
+      return;
+    }
+    case "import-settings": {
+      const path = await open({ multiple: false, filters: [{ name: "JSON", extensions: ["json"] }] });
+      if (typeof path !== "string") return;
+      try {
+        st.settings = await invoke<Settings>("import_settings", { path });
+        applyLanguage();
+        await refreshStatus();
+        toast(t("Настройки загружены"));
+        pingAll();
+      } catch (e) { toast(errText(e), true); }
+      return render();
+    }
     case "remove-sub": {
-      try { st.settings = await invoke<Settings>("remove_subscription", { url: el.dataset.url }); toast("Подписка удалена"); } catch (e) { toast(errText(e), true); }
+      try { st.settings = await invoke<Settings>("remove_subscription", { url: el.dataset.url }); toast(t("Подписка удалена")); } catch (e) { toast(errText(e), true); }
       return render();
     }
     case "toggle-updates": return saveSettings((x) => { x.general.check_updates = !x.general.check_updates; });
@@ -1015,7 +1208,7 @@ async function onAction(action: string, el: HTMLElement, ev: Event) {
       m.busy = true; m.error = ""; render();
       try {
         await invoke("install_update"); // при успехе клиент перезапустится сам
-        if (st.status?.portable) { st.modal = null; render(); toast("Скачай zip и распакуй поверх папки с программой"); }
+        if (st.status?.portable) { st.modal = null; render(); toast(t("Скачай zip и распакуй поверх папки с программой")); }
       } catch (e) {
         if (st.modal?.kind === "update") { st.modal.busy = false; st.modal.error = errText(e); }
         render();
@@ -1035,7 +1228,7 @@ async function onAction(action: string, el: HTMLElement, ev: Event) {
         st.settings = await invoke<Settings>("add_from_text", { text: m.text });
         clipboardDismissed = m.text;
         st.modal = null;
-        toast("Добавлено - можно подключаться");
+        toast(t("Добавлено - можно подключаться"));
         pingAll();
       } catch (e) {
         if (st.modal?.kind === "clipboard") { st.modal.busy = false; st.modal.error = errText(e); }
@@ -1046,7 +1239,7 @@ async function onAction(action: string, el: HTMLElement, ev: Event) {
     case "reminder-disable":
       st.modal = null;
       await saveSettings((x) => { x.reminder.enabled = false; });
-      return toast("Напоминание выключено - включить можно в настройках");
+      return toast(t("Напоминание выключено - включить можно в настройках"));
     case "close-modal": st.modal = null; return render();
     case "overlay": if (ev.target === el) { st.modal = null; render(); } return;
   }
@@ -1066,6 +1259,17 @@ document.addEventListener("keydown", (ev) => {
   if ((ev.key === "Enter" || ev.key === " ") && el.dataset?.action === "select-server") { ev.preventDefault(); onAction("select-server", el, ev); }
 });
 
+/** Обновить счётчик и кнопку «Добавить» в окне добавления, не перерисовывая поле ввода. */
+function updateAddButton(statsId: string, btnId: string, stats: { add: string[]; dup: number }) {
+  const info = document.getElementById(statsId);
+  const btn = document.getElementById(btnId) as HTMLButtonElement | null;
+  if (info) info.textContent = statsText(stats);
+  if (btn) {
+    btn.disabled = stats.add.length === 0;
+    btn.textContent = addLabel(stats.add.length);
+  }
+}
+
 document.addEventListener("input", (ev) => {
   const el = ev.target as HTMLTextAreaElement;
   if (el.dataset.input === "list-filter" && st.modal?.kind === "list") {
@@ -1077,45 +1281,49 @@ document.addEventListener("input", (ev) => {
   }
   if (el.dataset.input === "site-list" && st.modal?.kind === "add-sites") {
     st.modal.text = el.value;
-    const stats = siteStats(st.modal);
-    const info = document.getElementById("site-stats");
-    const btn = document.getElementById("add-sites-btn") as HTMLButtonElement | null;
-    if (info) info.textContent = statsText(stats);
-    if (btn) {
-      btn.disabled = stats.add.length === 0;
-      btn.textContent = `Добавить${stats.add.length ? " · " + stats.add.length : ""}`;
-    }
-    return;
+    return updateAddButton("site-stats", "add-sites-btn", siteStats(st.modal));
   }
   if (el.dataset.input !== "exe-list" || st.modal?.kind !== "add-app") return;
   st.modal.text = el.value;
-  const stats = manualStats(st.modal);
-  const info = document.getElementById("exe-stats");
-  const btn = document.getElementById("add-app-btn") as HTMLButtonElement | null;
-  if (info) info.textContent = statsText(stats);
-  if (btn) {
-    btn.disabled = stats.add.length === 0;
-    btn.textContent = `Добавить${stats.add.length ? " · " + stats.add.length : ""}`;
-  }
+  updateAddButton("exe-stats", "add-app-btn", manualStats(st.modal));
 });
 
-document.addEventListener("change", (ev) => {
+document.addEventListener("change", async (ev) => {
   const el = ev.target as HTMLInputElement;
   const kind = el.dataset.change;
   if (!kind) return;
-  if (kind === "pick" && st.modal?.kind === "add-app") {
-    const exe = el.dataset.exe!;
-    el.checked ? st.modal.picked.add(exe) : st.modal.picked.delete(exe);
-    return render();
+  const field = el.dataset.field as keyof Advanced;
+  const setAdv = (value: unknown) => saveSettings((x) => { (x.advanced as unknown as Record<string, unknown>)[field] = value; }, applied());
+  switch (kind) {
+    case "pick": {
+      if (st.modal?.kind !== "add-app") return;
+      const exe = el.dataset.exe!;
+      el.checked ? st.modal.picked.add(exe) : st.modal.picked.delete(exe);
+      return render();
+    }
+    case "port": {
+      const port = Number(el.value);
+      if (port >= 1024 && port <= 65535) saveSettings((x) => { x.advanced.mixed_port = port; }, applied());
+      else toast(t("Порт должен быть от 1024 до 65535"), true);
+      return;
+    }
+    case "log": return saveSettings((x) => { x.advanced.log_level = el.value; }, applied());
+    case "adv-dns-type": return saveSettings((x) => { x.advanced.remote_dns_type = el.value; }, applied());
+    case "adv-text": return setAdv(el.value.trim());
+    case "adv-select": return setAdv(el.value);
+    case "adv-number": {
+      const n = Number(el.value);
+      if (!Number.isFinite(n) || n < 0) return toast(t("Нужно число"), true);
+      return setAdv(Math.round(n));
+    }
+    case "adv-list": return setAdv(el.value.split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean));
+    case "reminder-day": return saveSettings((x) => { x.reminder.day = Number(el.value) || 20; x.reminder.last_shown = null; });
+    case "reminder-note": return saveSettings((x) => { x.reminder.note = el.value.trim(); });
+    case "sub-name": {
+      try { st.settings = await invoke<Settings>("rename_subscription", { url: el.dataset.url, name: el.value }); } catch (e) { toast(errText(e), true); }
+      return render();
+    }
   }
-  if (kind === "port") {
-    const port = Number(el.value);
-    if (port >= 1024 && port <= 65535) saveSettings((x) => { x.advanced.mixed_port = port; }, "Настройки применены");
-    else toast("Порт должен быть от 1024 до 65535", true);
-  }
-  if (kind === "dns") saveSettings((x) => { x.advanced.remote_dns = el.value.trim() || "1.1.1.1"; }, "Настройки применены");
-  if (kind === "log") saveSettings((x) => { x.advanced.log_level = el.value; }, "Настройки применены");
-
 });
 
 document.addEventListener("submit", async (ev) => {
@@ -1128,7 +1336,7 @@ document.addEventListener("submit", async (ev) => {
     try {
       st.settings = await invoke<Settings>("add_from_text", { text });
       st.modal = null;
-      toast("Сервер добавлен");
+      toast(t("Сервер добавлен"));
       pingAll();
     } catch (e) {
       if (st.modal?.kind === "add-server") { st.modal.busy = false; st.modal.error = errText(e); }
@@ -1141,10 +1349,12 @@ document.addEventListener("submit", async (ev) => {
 
 async function init() {
   render();
-  const full: { settings: Settings; status: Status; presets: Preset[] } = await invoke("get_state");
+  const full: { settings: Settings; status: Status; presets: Preset[]; defaults: Advanced } = await invoke("get_state");
   st.settings = full.settings;
   st.status = full.status;
   st.presets = full.presets;
+  st.defaults = full.defaults;
+  applyLanguage();
   render();
 
   await listen<string>("core-log", (e: { payload: string }) => {
@@ -1168,12 +1378,12 @@ async function init() {
       setTimeout(() => { st.busy = false; toggleConnect(); }, 2000);
       return;
     }
-    toast(`Ядро остановилось${last ? ": " + last : ""}`, true);
+    toast(t("Ядро остановилось") + (last ? ": " + last : ""), true);
   });
 
   setInterval(() => {
-    const t = document.getElementById("timer");
-    if (t && st.status?.running) t.textContent = `· ${elapsed()}`;
+    const el = document.getElementById("timer");
+    if (el && st.status?.running) el.textContent = `· ${elapsed()}`;
   }, 1000);
   await refreshUsage();
   render();
@@ -1181,6 +1391,8 @@ async function init() {
 
   checkReminder();
   setInterval(checkReminder, 30 * 60 * 1000);
+  autoUpdateSubs();
+  setInterval(autoUpdateSubs, 15 * 60 * 1000);
   if (full.settings.servers.length) pingAll();
   st.autostart = await invoke<boolean>("get_autostart").catch(() => false);
   syncIndicators();
@@ -1205,5 +1417,6 @@ async function init() {
 }
 
 init().catch((e) => {
-  root.innerHTML = `<div style="padding:32px">Не удалось запустить интерфейс: ${esc(errText(e))}</div>`;
+  root.innerHTML = `<div style="padding:32px">${t("Не удалось запустить интерфейс")}: ${esc(errText(e))}</div>`;
 });
+
