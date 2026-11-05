@@ -102,6 +102,7 @@ impl AppState {
             windows: cfg!(windows),
             tun: settings::TUN_AVAILABLE,
             portable: self.portable,
+            auto: s.auto_server,
         }
     }
 }
@@ -119,6 +120,8 @@ struct Status {
     /// Можно ли включить TUN (Windows, macOS).
     tun: bool,
     portable: bool,
+    /// Выбран «Авто»: сервер выбирает ядро.
+    auto: bool,
 }
 
 #[derive(Serialize)]
@@ -215,7 +218,64 @@ async fn restart_if_running(app: &AppHandle, state: &AppState) -> Result<(), Str
     Ok(())
 }
 
-async fn fetch_subscription(url: &str, user_agent: &str) -> Result<Vec<String>, String> {
+/// Что пришло по ссылке подписки: ключи, трафик и срок, название от панели.
+struct Fetched {
+    links: Vec<String>,
+    info: Option<settings::SubInfo>,
+    title: Option<String>,
+}
+
+/// «upload=1; download=2; total=3; expire=1700000000» → трафик и срок подписки.
+fn parse_userinfo(header: &str) -> Option<settings::SubInfo> {
+    let mut info = settings::SubInfo::default();
+    let mut any = false;
+    for part in header.split(';') {
+        let Some((k, v)) = part.split_once('=') else { continue };
+        let Ok(n) = v.trim().parse::<f64>() else { continue };
+        let n = n.max(0.0) as u64;
+        any = true;
+        match k.trim().to_ascii_lowercase().as_str() {
+            "upload" => info.upload = n,
+            "download" => info.download = n,
+            "total" => info.total = n,
+            "expire" => info.expire = (n > 0).then_some(n),
+            _ => {}
+        }
+    }
+    any.then_some(info)
+}
+
+/// Заголовок profile-title: «base64:…» или обычный текст.
+fn parse_title(header: &str) -> Option<String> {
+    use base64::Engine;
+    let raw = header.trim();
+    let text = match raw.strip_prefix("base64:") {
+        Some(b) => String::from_utf8(base64::engine::general_purpose::STANDARD.decode(b.trim()).ok()?).ok()?,
+        None => raw.to_string(),
+    };
+    let text: String = text.trim().chars().take(60).collect();
+    (!text.is_empty()).then_some(text)
+}
+
+/// Название по умолчанию - его можно заменить названием от панели.
+fn default_sub_name(name: &str) -> bool {
+    name == "Подписка" || name == "Subscription"
+}
+
+/// Записать в подписку свежие трафик, срок, название и время обновления.
+fn apply_fetched(s: &mut Settings, url: &str, f: &Fetched) {
+    if let Some(sub) = s.subscriptions.iter_mut().find(|sub| sub.url == url) {
+        sub.updated = Some(now_secs());
+        sub.info = f.info.clone();
+        if let Some(title) = &f.title {
+            if default_sub_name(&sub.name) {
+                sub.name = title.clone();
+            }
+        }
+    }
+}
+
+async fn fetch_subscription(url: &str, user_agent: &str) -> Result<Fetched, String> {
     let ua = if user_agent.trim().is_empty() {
         format!("ShredingerBox/{}", env!("CARGO_PKG_VERSION"))
     } else {
@@ -226,16 +286,17 @@ async fn fetch_subscription(url: &str, user_agent: &str) -> Result<Vec<String>, 
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| e.to_string())?;
-    let body = client
+    let resp = client
         .get(url)
         .send()
         .await
         .map_err(|e| format!("{}: {e}", tr("Подписка не загрузилась", "Subscription failed to load")))?
         .error_for_status()
-        .map_err(|e| format!("{}: {e}", tr("Сервер подписки ответил ошибкой", "Subscription server returned an error")))?
-        .text()
-        .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("{}: {e}", tr("Сервер подписки ответил ошибкой", "Subscription server returned an error")))?;
+    let header = |name: &str| resp.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
+    let info = header("subscription-userinfo").as_deref().and_then(parse_userinfo);
+    let title = header("profile-title").as_deref().and_then(parse_title);
+    let body = resp.text().await.map_err(|e| e.to_string())?;
     let links = links::parse_subscription_body(&body);
     if links.is_empty() {
         return Err(tr(
@@ -244,7 +305,7 @@ async fn fetch_subscription(url: &str, user_agent: &str) -> Result<Vec<String>, 
         )
         .into());
     }
-    Ok(links)
+    Ok(Fetched { links, info, title })
 }
 
 /// Заменить серверы одной подписки свежим списком.
@@ -389,11 +450,12 @@ fn affects_core(old: &Settings, new: &Settings) -> bool {
         s.reminder = Default::default();
         s.seen_version = None;
         s.advanced.enabled = false;
-        s.advanced.sub_update_hours = 0;
+        s.advanced.subs_refresh_hours = 0;
         s.advanced.sub_user_agent.clear();
         for sub in &mut s.subscriptions {
             sub.name.clear();
             sub.updated = None;
+            sub.info = None;
         }
         s
     };
@@ -419,16 +481,17 @@ async fn add_from_text(app: AppHandle, state: State<'_, AppState>, text: String)
     let text = text.trim().to_string();
     let mut s = state.snapshot();
     if text.starts_with("http://") || text.starts_with("https://") {
-        let list = fetch_subscription(&text, &s.advanced.sub_user_agent).await?;
-        match s.subscriptions.iter_mut().find(|sub| sub.url == text) {
-            Some(sub) => sub.updated = Some(now_secs()),
-            None => s.subscriptions.push(Subscription {
+        let fetched = fetch_subscription(&text, &s.advanced.sub_user_agent).await?;
+        if !s.subscriptions.iter().any(|sub| sub.url == text) {
+            s.subscriptions.push(Subscription {
                 url: text.clone(),
                 name: tr("Подписка", "Subscription").into(),
-                updated: Some(now_secs()),
-            }),
+                updated: None,
+                info: None,
+            });
         }
-        merge_subscription(&mut s, &text, list);
+        apply_fetched(&mut s, &text, &fetched);
+        merge_subscription(&mut s, &text, fetched.links);
     } else {
         let mut added = 0;
         let mut first_err = None;
@@ -459,19 +522,44 @@ async fn add_from_text(app: AppHandle, state: State<'_, AppState>, text: String)
     Ok(s)
 }
 
+/// Обновить все подписки. Одна сломанная подписка не мешает остальным; ошибка - только
+/// если не обновилась ни одна. Если серверы поменялись, а VPN включён, ядро перезапускается.
 #[tauri::command]
-async fn refresh_subscriptions(state: State<'_, AppState>) -> Result<Settings, String> {
-    let mut s = state.snapshot();
+async fn refresh_subscriptions(app: AppHandle, state: State<'_, AppState>) -> Result<Settings, String> {
+    let old = state.snapshot();
+    let mut s = old.clone();
     let urls: Vec<String> = s.subscriptions.iter().map(|sub| sub.url.clone()).collect();
-    for url in urls {
-        let list = fetch_subscription(&url, &s.advanced.sub_user_agent).await?;
-        merge_subscription(&mut s, &url, list);
-        if let Some(sub) = s.subscriptions.iter_mut().find(|sub| sub.url == url) {
-            sub.updated = Some(now_secs());
+    let mut first_err = None;
+    let mut ok = 0;
+    for url in &urls {
+        match fetch_subscription(url, &s.advanced.sub_user_agent).await {
+            Ok(fetched) => {
+                apply_fetched(&mut s, url, &fetched);
+                merge_subscription(&mut s, url, fetched.links);
+                ok += 1;
+            }
+            Err(e) => {
+                first_err.get_or_insert(e);
+            }
         }
     }
-    state.store(s.clone())?;
-    Ok(s)
+    if ok == 0 {
+        if let Some(e) = first_err {
+            return Err(e);
+        }
+    }
+    // Подписки могли поменяться, пока шла загрузка, - берём свежие настройки и меняем только подписки.
+    let mut current = state.snapshot();
+    current.subscriptions = s.subscriptions;
+    current.servers = s.servers;
+    current.selected = s.selected;
+    state.store(current.clone())?;
+    if affects_core(&old, &current) {
+        let restarted = restart_if_running(&app, &state).await;
+        update_indicators(&app);
+        restarted?;
+    }
+    Ok(current)
 }
 
 #[tauri::command]
@@ -564,20 +652,39 @@ async fn ping_servers(state: State<'_, AppState>) -> Result<Vec<Ping>, String> {
 #[tauri::command]
 async fn select_server(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<Status, String> {
     let mut s = state.snapshot();
-    if !s.servers.iter().any(|srv| srv.id == id) {
-        return Err(tr("Сервер не найден", "Server not found").into());
-    }
-    s.selected = Some(id.clone());
+    let tag = if id == config::AUTO_TAG {
+        s.auto_server = true;
+        config::AUTO_TAG.to_string()
+    } else {
+        if !s.servers.iter().any(|srv| srv.id == id) {
+            return Err(tr("Сервер не найден", "Server not found").into());
+        }
+        s.auto_server = false;
+        s.selected = Some(id.clone());
+        core::server_tag(&id)
+    };
     state.store(s)?;
-    if state.core.is_running()
-        && !clash_select(state.core.api_port, &state.core.secret, &core::server_tag(&id)).await
-    {
+    if state.core.is_running() && !clash_select(state.core.api_port, &state.core.secret, &tag).await {
         // Сервера нет в запущенном конфиге (добавлен после подключения) - перезапускаем.
         let restarted = restart_if_running(&app, &state).await;
         update_indicators(&app);
         restarted?;
     }
     Ok(state.status())
+}
+
+/// Какой сервер сейчас выбрал «Авто» (id), если VPN включён.
+#[tauri::command]
+async fn auto_current(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    if !state.core.is_running() {
+        return Ok(None);
+    }
+    let url = format!("http://127.0.0.1:{}/proxies/{}", state.core.api_port, config::AUTO_TAG);
+    let Some(client) = api_client() else { return Ok(None) };
+    let Ok(resp) = client.get(url).bearer_auth(&state.core.secret).send().await else { return Ok(None) };
+    let Ok(text) = resp.text().await else { return Ok(None) };
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+    Ok(value["now"].as_str().and_then(|t| t.strip_prefix("srv-")).map(str::to_string))
 }
 
 #[tauri::command]
@@ -937,7 +1044,8 @@ pub fn run() {
             export_settings,
             import_settings,
             check_services,
-            rename_subscription
+            rename_subscription,
+            auto_current
         ])
         .build(tauri::generate_context!())
         .expect("не удалось запустить ShredingerBox");
@@ -958,13 +1066,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn subscription_headers() {
+        let i = parse_userinfo("upload=100; download=2000; total=10737418240; expire=1767225600").unwrap();
+        assert_eq!((i.upload, i.download, i.total, i.expire), (100, 2000, 10737418240, Some(1767225600)));
+        let i = parse_userinfo("upload=0; download=5; total=0; expire=0").unwrap();
+        assert_eq!((i.total, i.expire), (0, None));
+        assert!(parse_userinfo("garbage").is_none());
+        assert_eq!(parse_title("base64:0J/QvtC00L/QuNGB0LrQsA==").as_deref(), Some("Подписка"));
+        assert_eq!(parse_title("  My VPN ").as_deref(), Some("My VPN"));
+        assert!(parse_title("   ").is_none());
+    }
+
+    #[test]
     fn language_and_theme_do_not_restart_core() {
         let old = Settings::default();
         let mut new = old.clone();
         new.general.language = "en".into();
         new.general.theme = "light".into();
         new.reminder.day = 5;
-        new.advanced.sub_update_hours = 24;
+        new.advanced.subs_refresh_hours = 24;
         assert!(!affects_core(&old, &new));
         new.advanced.block_quic = true;
         assert!(affects_core(&old, &new));

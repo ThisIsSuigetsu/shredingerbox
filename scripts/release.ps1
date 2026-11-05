@@ -7,6 +7,10 @@ $ErrorActionPreference = 'Stop'
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Версия должна быть вида 0.5.1, а не '$Version'" }
 Set-Location (Join-Path $PSScriptRoot '..')
 
+# Напоминание о новых версиях sing-box и GitHub Actions. Выпуск оно не останавливает.
+try { & (Join-Path $PSScriptRoot 'check-updates.ps1') } catch { Write-Host "Не удалось проверить обновления: $_" }
+Write-Host ""
+
 function Set-Version([string]$Path, [string]$Pattern, [string]$Replacement) {
     $text = [System.IO.File]::ReadAllText((Resolve-Path $Path))
     $regex = [regex]$Pattern

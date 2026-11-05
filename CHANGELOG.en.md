@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.9.0
+
+- Subscriptions update by themselves: when the app starts and every 12 hours. New and changed
+  servers appear without pressing Update. The interval is in Advanced mode → Subscriptions.
+- Remaining traffic and the subscription end date on the Servers screen, if the panel reports them.
+  The subscription name also comes from the panel.
+- The renewal reminder can fire 3 days before the subscription ends instead of on a day of the month.
+- Auto in the server list: the core picks the server with the lowest latency and switches if the
+  current one stops responding. Off by default.
+- If one subscription fails to load, the others still update.
+- A safer build: the sing-box core version is pinned and checked against its checksum, and the GitHub
+  build steps are pinned to exact commits.
+
 ## 0.8.1
 
 - Language and theme switch instantly. The VPN no longer reconnects when you change the language,

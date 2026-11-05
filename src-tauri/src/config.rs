@@ -4,6 +4,9 @@ use crate::presets;
 use crate::settings::{FinalRoute, Mode, Settings};
 use serde_json::{json, Value};
 
+/// Тег «Авто» в конфиге: urltest над всеми серверами.
+pub const AUTO_TAG: &str = "auto";
+
 pub struct CoreParams {
     pub api_port: u16,
     pub secret: String,
@@ -202,13 +205,28 @@ pub fn build(settings: &Settings, servers: &[(String, Value)], selected_tag: &st
         inbounds.push(tun);
     }
 
-    let mut outbounds: Vec<Value> = vec![json!({
-        "type": "selector",
-        "tag": "proxy",
-        "outbounds": servers.iter().map(|(tag, _)| tag.clone()).collect::<Vec<_>>(),
-        "default": selected_tag,
-        "interrupt_exist_connections": true
-    })];
+    // «Авто» стоит в селекторе всегда: на него и обратно переключаемся без перезапуска ядра.
+    let tags: Vec<String> = servers.iter().map(|(tag, _)| tag.clone()).collect();
+    let mut choices = vec![AUTO_TAG.to_string()];
+    choices.extend(tags.iter().cloned());
+    let mut outbounds: Vec<Value> = vec![
+        json!({
+            "type": "selector",
+            "tag": "proxy",
+            "outbounds": choices,
+            "default": if settings.auto_server { AUTO_TAG } else { selected_tag },
+            "interrupt_exist_connections": true
+        }),
+        json!({
+            "type": "urltest",
+            "tag": AUTO_TAG,
+            "outbounds": tags,
+            "url": "https://www.gstatic.com/generate_204",
+            "interval": "3m",
+            "tolerance": 50,
+            "interrupt_exist_connections": true
+        }),
+    ];
     for (tag, ob) in servers {
         let mut ob = ob.clone();
         ob["tag"] = json!(tag);
@@ -306,7 +324,8 @@ mod tests {
         assert_eq!(c["outbounds"][0]["tag"], "proxy");
         assert_eq!(c["outbounds"][0]["type"], "selector");
         assert_eq!(c["outbounds"][0]["default"], "srv-a");
-        assert_eq!(c["outbounds"][1]["tag"], "srv-a");
+        assert_eq!(c["outbounds"][1]["type"], "urltest");
+        assert_eq!(c["outbounds"][2]["tag"], "srv-a");
         assert_eq!(c["inbounds"][1]["type"], "tun");
         assert_eq!(c["route"]["final"], "proxy");
         assert_eq!(c["dns"]["final"], "dns-remote");
@@ -335,6 +354,18 @@ mod tests {
         assert_eq!(rules[3]["outbound"], "direct");
         assert_eq!(rules[4]["outbound"], "proxy");
         assert_eq!(c["dns"]["rules"][0]["server"], "dns-local");
+    }
+
+    #[test]
+    fn auto_server_is_default_only_when_chosen() {
+        let mut s = Settings::default();
+        let c = build(&s, &one(json!({"type":"direct"})), "srv-a", &params());
+        assert_eq!(c["outbounds"][0]["default"], "srv-a");
+        assert_eq!(c["outbounds"][0]["outbounds"], json!(["auto", "srv-a"]));
+        assert_eq!(c["outbounds"][1]["outbounds"], json!(["srv-a"]));
+        s.auto_server = true;
+        let c = build(&s, &one(json!({"type":"direct"})), "srv-a", &params());
+        assert_eq!(c["outbounds"][0]["default"], "auto");
     }
 
     #[test]

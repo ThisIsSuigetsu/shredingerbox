@@ -13,7 +13,8 @@ Add a subscription, press one button, you're connected. Fine-tuning lives in adv
 **Connection**
 - `vless://` (Reality, TLS, ws, grpc, httpupgrade), `hy2://` (Salamander, port ranges),
   `trojan://` and `ss://` keys.
-- Subscriptions by `https://…` link - base64 or a list of keys, updated with one click or on a schedule.
+- Subscriptions by `https://…` link - base64 or a list of keys. They update by themselves on start and
+  every 12 hours and show remaining traffic and the end date if the panel reports them.
 - Copy a key or a subscription and the app offers to add it from the clipboard.
 - Two modes: **TUN** - all computer traffic, **Proxy** - the system proxy, no administrator rights
   needed on Windows.
@@ -21,6 +22,7 @@ Add a subscription, press one button, you're connected. Fine-tuning lives in adv
 **Servers**
 - Servers grouped by subscription, manual keys separately.
 - Real ping of every server through the tunnel, switching without reconnecting.
+- Auto - the core picks the server with the lowest latency and moves off one that goes down.
 - Download and upload speed, session timer, monthly traffic per server.
 
 **Rules**

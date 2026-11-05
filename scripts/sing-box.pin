@@ -1,0 +1,5 @@
+# Версия ядра sing-box, которая попадает в сборку, и SHA256 архивов из её релиза на GitHub.
+# Меняется только через scripts/update-sing-box.ps1 - после проверки новой версии.
+version=1.14.4
+windows-amd64=99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df
+darwin-arm64=0d8c7f5ed5d587b0f1a5e9772a708ec3bfa4ac4c9329604b01d8d9c2ba406838

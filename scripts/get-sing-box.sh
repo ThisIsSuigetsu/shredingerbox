@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Скачивает последнее ядро sing-box для macOS/Linux и кладёт его под именем, которое ждёт Tauri.
+# Скачивает ядро sing-box той версии, что записана в sing-box.pin, сверяет SHA256
+# и кладёт его под именем, которое ждёт Tauri.
 #   bash scripts/get-sing-box.sh darwin-arm64 aarch64-apple-darwin
 set -euo pipefail
 
@@ -8,27 +9,29 @@ TRIPLE="$2"         # целевая платформа Rust, например a
 
 cd "$(dirname "$0")/.."
 
-api="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
-if [ -n "${GITHUB_TOKEN:-}" ]; then
-  release_json=$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" "$api")
+pin() { sed -n "s/^$1=\([^[:space:]]*\).*/\1/p" scripts/sing-box.pin; }
+version=$(pin version)
+expected=$(pin "$ASSET_SUFFIX")
+[ -n "$expected" ] || { echo "В sing-box.pin нет SHA256 для $ASSET_SUFFIX" >&2; exit 1; }
+
+name="sing-box-$version-$ASSET_SUFFIX.tar.gz"
+tmp=$(mktemp -d)
+echo "Скачиваю $name"
+curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v$version/$name" -o "$tmp/sing-box.tar.gz"
+
+if command -v sha256sum >/dev/null; then
+  actual=$(sha256sum "$tmp/sing-box.tar.gz" | cut -d' ' -f1)
 else
-  release_json=$(curl -fsSL "$api")
+  actual=$(shasum -a 256 "$tmp/sing-box.tar.gz" | cut -d' ' -f1)
+fi
+if [ "$actual" != "$expected" ]; then
+  echo "SHA256 архива sing-box не совпадает с sing-box.pin: ждали $expected, получили $actual" >&2
+  exit 1
 fi
 
-url=$(printf '%s' "$release_json" | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-suffix = '-' + sys.argv[1] + '.tar.gz'
-print(next(a['browser_download_url'] for a in data['assets'] if a['name'].endswith(suffix)))
-" "$ASSET_SUFFIX")
-
-tmp=$(mktemp -d)
-echo "Скачиваю $url"
-curl -fsSL "$url" -o "$tmp/sing-box.tar.gz"
 tar -xzf "$tmp/sing-box.tar.gz" -C "$tmp"
-
 mkdir -p src-tauri/binaries
 bin=$(find "$tmp" -type f -name sing-box | head -n 1)
 cp "$bin" "src-tauri/binaries/sing-box-$TRIPLE"
 chmod +x "src-tauri/binaries/sing-box-$TRIPLE"
-echo "Готово: src-tauri/binaries/sing-box-$TRIPLE"
+echo "Готово: sing-box $version, SHA256 совпал"

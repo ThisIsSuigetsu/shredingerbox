@@ -13,26 +13,28 @@ type Theme = "system" | "dark" | "light";
 type FinalRoute = "proxy" | "direct";
 interface Server { id: string; name: string; link: string; subscription: string | null }
 interface AppRule { name: string; exe: string }
-interface Subscription { url: string; name: string; updated: number | null }
+interface SubInfo { upload: number; download: number; total: number; expire: number | null }
+interface Subscription { url: string; name: string; updated: number | null; info: SubInfo | null }
 interface Advanced {
   enabled: boolean; mixed_port: number; allow_lan: boolean; log_level: string;
   remote_dns: string; remote_dns_type: string; direct_dns: string; dns_strategy: string;
   tun_stack: string; tun_mtu: number; tun_strict_route: boolean; tun_ipv6: boolean;
   sniff: boolean; bypass_lan: boolean; block_quic: boolean; proxy_ips: string[]; direct_ips: string[];
-  sub_update_hours: number; sub_user_agent: string;
+  subs_refresh_hours: number; sub_user_agent: string;
 }
 interface Settings {
   mode: Mode;
   servers: Server[];
   subscriptions: Subscription[];
   selected: string | null;
+  auto_server: boolean;
   rules: { final_route: FinalRoute; proxy_apps: AppRule[]; direct_apps: AppRule[]; proxy_domains: string[]; direct_domains: string[]; presets: string[] };
   advanced: Advanced;
-  reminder: { enabled: boolean; last_shown: string | null; day: number; note: string };
+  reminder: { enabled: boolean; last_shown: string | null; day: number; note: string; mode: "day" | "expire" };
   general: { autoconnect: boolean; close_to_tray: boolean; clipboard_offer: boolean; check_updates: boolean; theme: Theme; language: LangSetting };
   seen_version: string | null;
 }
-interface Status { running: boolean; mode: Mode; server: string | null; api_port: number; secret: string; elevated: boolean; windows: boolean; tun: boolean; portable: boolean }
+interface Status { running: boolean; mode: Mode; server: string | null; api_port: number; secret: string; elevated: boolean; windows: boolean; tun: boolean; portable: boolean; auto: boolean }
 interface Preset { id: string; title: string; domains: string[] }
 interface Ping { id: string; ms: number | null; udp: boolean; via_vpn: boolean }
 interface Proc { name: string; exe: string }
@@ -74,6 +76,8 @@ const st = {
   autostart: false,
   autostartBusy: false,
   siteTab: "proxy_domains" as SiteList,
+  /** Какой сервер сейчас выбрало «Авто» (id), пока VPN включён. */
+  autoNow: null as string | null,
   /** Расход трафика по серверам за текущий месяц. */
   usage: { month: "", servers: {} as Record<string, Usage> },
 };
@@ -189,6 +193,38 @@ const errText = (e: unknown) => (typeof e === "string" ? e : (e as Error)?.messa
 function selected(): Server | undefined {
   const s = st.settings!;
   return s.servers.find((x) => x.id === s.selected) ?? s.servers[0];
+}
+
+/** Сервер, через который сейчас идёт трафик: при «Авто» - выбранный ядром. */
+function activeServer(): Server | undefined {
+  const s = st.settings!;
+  if (s.auto_server) return s.servers.find((x) => x.id === st.autoNow);
+  return selected();
+}
+
+/** «20 декабря» (год - только если не текущий). */
+function dateText(sec: number): string {
+  const d = new Date(sec * 1000);
+  const opts: Intl.DateTimeFormatOptions = { day: "numeric", month: "long" };
+  if (d.getFullYear() !== new Date().getFullYear()) opts.year = "numeric";
+  return d.toLocaleDateString(locale(), opts);
+}
+
+/** «осталось 120 ГБ из 200 ГБ · до 20 декабря» - из заголовка subscription-userinfo. */
+function subInfoText(info: SubInfo | null): string {
+  if (!info) return "";
+  const parts: string[] = [];
+  const used = info.upload + info.download;
+  if (info.total > 0) parts.push(t("осталось {left} из {total}", { left: bytes(Math.max(0, info.total - used)), total: bytes(info.total) }));
+  else if (used > 0) parts.push(t("потрачено {used}", { used: bytes(used) }));
+  if (info.expire) parts.push(info.expire * 1000 < Date.now() ? t("истекла {date}", { date: dateText(info.expire) }) : t("до {date}", { date: dateText(info.expire) }));
+  return parts.join(" · ");
+}
+
+/** Ближайший конец подписки среди всех подписок. */
+function nearestExpire(): number | null {
+  const list = st.settings!.subscriptions.map((x) => x.info?.expire).filter((x): x is number => !!x);
+  return list.length ? Math.min(...list) : null;
 }
 
 /** Имя подписки: стандартное «Подписка» показываем на языке интерфейса. */
@@ -434,10 +470,17 @@ function stopTraffic() {
   st.traffic = { up: 0, down: 0 };
 }
 
+/** Узнать у ядра, какой сервер выбрало «Авто». */
+async function refreshAuto() {
+  if (!st.settings?.auto_server || !st.status?.running) { st.autoNow = null; return; }
+  st.autoNow = await invoke<string | null>("auto_current").catch(() => null);
+}
+
 async function pingAll() {
   try {
     const list = await invoke<Ping[]>("ping_servers");
     st.pings = Object.fromEntries(list.map((p: Ping) => [p.id, p]));
+    await refreshAuto();
     render();
   } catch (e) {
     toast(errText(e), true);
@@ -457,14 +500,15 @@ async function checkServices() {
   render();
 }
 
-/** Автообновление подписок раз в N часов (продвинутый режим → «Подписки»). Ошибки молчат. */
+/** Автообновление подписок раз в N часов и при запуске клиента (продвинутый режим → «Подписки»).
+ *  Ошибки молчат - попробуем в следующий раз. */
 let subsUpdating = false;
-async function autoUpdateSubs() {
+async function autoUpdateSubs(atStart = false) {
   const s = st.settings;
-  const hours = s?.advanced.sub_update_hours ?? 0;
+  const hours = s?.advanced.subs_refresh_hours ?? 0;
   if (!s || !hours || !s.subscriptions.length || subsUpdating) return;
   const now = Date.now() / 1000;
-  if (!s.subscriptions.some((sub) => !sub.updated || now - sub.updated >= hours * 3600)) return;
+  if (!atStart && !s.subscriptions.some((sub) => !sub.updated || now - sub.updated >= hours * 3600)) return;
   subsUpdating = true;
   try { st.settings = await invoke<Settings>("refresh_subscriptions"); render(); } catch { /* попробуем позже */ }
   subsUpdating = false;
@@ -476,8 +520,9 @@ function sidebar(): string {
   const s = st.settings!;
   const nav = (v: View, label: string, ic: string) =>
     `<button class="nav-btn ${st.view === v ? "active" : ""}" data-action="nav" data-view="${v}">${ic}${label}</button>`;
+  const exp = nearestExpire();
   const sub = s.subscriptions.length
-    ? `<div class="sub-card"><div class="t"><b>${t("Подписка")}</b><span>${t("{n} серв.", { n: s.servers.filter((x) => x.subscription).length })}</span></div>
+    ? `<div class="sub-card"><div class="t"><b>${t("Подписка")}</b><span>${t("{n} серв.", { n: s.servers.filter((x) => x.subscription).length })}${exp ? " · " + esc(t("до {date}", { date: dateText(exp) })) : ""}</span></div>
        <button class="x-btn" data-action="refresh-subs" aria-label="${t("Обновить подписку")}" title="${t("Обновить подписку")}">${icon.refresh}</button></div>`
     : "";
   return `<nav class="side" aria-label="${t("Разделы")}">
@@ -505,22 +550,24 @@ const keysHint = () => t("Серверов пока нет. Вставь клю�
 function mainView(): string {
   const s = st.settings!;
   const running = !!st.status?.running;
-  const srv = selected();
+  const srv = activeServer();
   const flag = srv ? splitFlag(srv.name) : null;
   const powerCls = st.busy ? "busy" : running ? "on" : "";
   const title = st.busy ? (running ? t("Отключаемся…") : t("Подключаемся…")) : running
     ? `${t("Подключено")} <span class="timer" id="timer">· ${elapsed()}</span>`
     : t("Не подключено");
   const month = srv ? usageOf(srv.id) : null;
+  const autoMark = s.auto_server ? `<span class="flag">${t("АВТО")}</span>` : "";
   const sub = srv
-    ? `<span class="flag">${esc(flag!.code)}</span>${esc(flag!.name)}${st.pings[srv.id] ? " · " + pingView(srv.id) : ""}
+    ? `${autoMark}<span class="flag">${esc(flag!.code)}</span>${esc(flag!.name)}${st.pings[srv.id] ? " · " + pingView(srv.id) : ""}
        <span data-usage-long="${esc(srv.id)}" title="${esc(month!.title)}">${esc(usageLong(month!.short))}</span>`
+    : s.auto_server && s.servers.length ? `${autoMark}${t("Лучший сервер выберется при подключении")}`
     : t("Добавь сервер, чтобы подключиться");
 
   const servers = s.servers.length
-    ? s.servers.map((x) => {
+    ? autoRow() + s.servers.map((x) => {
         const f = splitFlag(x.name);
-        return `<div class="server ${x.id === srv?.id ? "on" : ""}" role="button" tabindex="0" data-action="select-server" data-id="${x.id}">
+        return `<div class="server ${!s.auto_server && x.id === srv?.id ? "on" : ""}" role="button" tabindex="0" data-action="select-server" data-id="${x.id}">
           <span class="flag">${esc(f.code)}</span><span class="name" title="${esc(x.name)}">${esc(f.name)}</span>${pingView(x.id)}
           <button class="del" data-action="remove-server" data-id="${x.id}" aria-label="${t("Удалить сервер")}">${icon.x(13)}</button>
         </div>`;
@@ -565,9 +612,17 @@ function mainView(): string {
   </div>`;
 }
 
+/** Строка «Авто»: ядро само выбирает сервер с наименьшей задержкой. */
+function autoRow(): string {
+  const on = st.settings!.auto_server;
+  const now = on ? st.settings!.servers.find((x) => x.id === st.autoNow) : undefined;
+  return `<div class="server ${on ? "on" : ""}" role="button" tabindex="0" data-action="select-server" data-id="auto" title="${t("Ядро само выбирает сервер с наименьшей задержкой и уходит с упавшего")}">
+    <span class="flag">${t("АВТО")}</span><span class="name">${now ? esc(t("Авто · {name}", { name: splitFlag(now.name).name })) : t("Лучший сервер")}</span></div>`;
+}
+
 function serverRow(x: Server, current: Server | undefined): string {
   const f = splitFlag(x.name);
-  return `<div class="server ${x.id === current?.id ? "on" : ""}" role="button" tabindex="0" data-action="select-server" data-id="${x.id}">
+  return `<div class="server ${!st.settings!.auto_server && x.id === current?.id ? "on" : ""}" role="button" tabindex="0" data-action="select-server" data-id="${x.id}">
     <span class="flag">${esc(f.code)}</span><span class="name" title="${esc(x.name)}">${esc(f.name)}</span>${usageView(x.id)}${pingView(x.id)}
     <button class="del" data-action="remove-server" data-id="${x.id}" aria-label="${t("Удалить сервер")}">${icon.x(13)}</button>
   </div>`;
@@ -585,6 +640,7 @@ function serversView(): string {
         <div style="display:flex;flex-direction:column;gap:2px;min-width:0">
           <h2>${esc(subName(sub))} <span class="count">· ${list.length}</span></h2>
           <span class="muted mono" style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(host(sub.url))}</span>
+          ${sub.info ? `<span class="muted" style="font-size:12px">${esc(subInfoText(sub.info))}</span>` : ""}
         </div>
         <div style="display:flex;gap:4px">
           <button class="x-btn" data-action="refresh-subs" aria-label="${t("Обновить подписку")}" title="${t("Обновить")}">${icon.refresh}</button>
@@ -610,7 +666,7 @@ function serversView(): string {
         <button class="btn-light" data-action="open-add-server">${t("Добавить")}</button>
       </div>
     </div>
-    <div class="settings" style="max-width:none">${empty}${groups}${manualCard}</div>`;
+    <div class="settings" style="max-width:none">${s.servers.length > 1 ? `<section class="card"><div class="server-list" style="max-height:none">${autoRow()}</div></section>` : ""}${empty}${groups}${manualCard}</div>`;
 }
 
 const isAppList = (list: AppList | SiteList): list is AppList => list === "proxy_apps" || list === "direct_apps";
@@ -746,11 +802,12 @@ function advancedTab(): string {
       const fmt = (sec: number | null) => (sec ? new Date(sec * 1000).toLocaleString(locale(), { dateStyle: "short", timeStyle: "short" }) : t("ещё не обновлялась"));
       const subs = s.subscriptions.map((sub, i) => `<div class="set-row"><div class="t" style="min-width:0">
           <input id="sub-${i}" class="field" style="width:100%;max-width:260px" data-change="sub-name" data-url="${esc(sub.url)}" value="${esc(subName(sub))}" aria-label="${t("Название подписки")}" />
-          <span class="mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(host(sub.url))} · ${esc(fmt(sub.updated))}</span></div>
+          <span class="mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(host(sub.url))} · ${esc(fmt(sub.updated))}</span>
+          ${sub.info ? `<span>${esc(subInfoText(sub.info))}</span>` : ""}</div>
           <button class="x-btn" data-action="refresh-subs" aria-label="${t("Обновить подписку")}" title="${t("Обновить")}">${icon.refresh}</button></div>`).join("");
       return card(
         row(t("Обновлять подписки"), t("Список серверов подтягивается сам, пока клиент запущен"),
-          select("sub-hours", "adv-number", String(a.sub_update_hours), [["0", t("Вручную")], ["6", t("Каждые 6 часов")], ["12", t("Каждые 12 часов")], ["24", t("Раз в сутки")], ["72", t("Раз в 3 дня")]], "sub_update_hours"), "sub-hours")
+          select("sub-hours", "adv-number", String(a.subs_refresh_hours), [["0", t("Вручную")], ["1", t("Каждый час")], ["6", t("Каждые 6 часов")], ["12", t("Каждые 12 часов")], ["24", t("Раз в сутки")]], "subs_refresh_hours"), "sub-hours")
         + row("User-Agent", t("Некоторые панели отдают разный список для разных клиентов. Пусто - «ShredingerBox/версия»"),
           `<input id="sub-ua" class="field mono" data-change="adv-text" data-field="sub_user_agent" value="${esc(a.sub_user_agent)}" placeholder="ShredingerBox/${esc(APP_VERSION)}" />`, "sub-ua"),
       ) + (subs ? card(subs) : `<section class="card"><div class="empty">${t("Подписок пока нет")}</div></section>`);
@@ -792,10 +849,16 @@ function settingsView(): string {
       ${row(t("Сворачивать в трей при закрытии"), t("Крестик прячет окно, VPN продолжает работать"), sw(g.close_to_tray, "toggle-tray", t("Сворачивать в трей при закрытии")))}
     </section>`;
   const r = s.reminder;
+  const exp = nearestExpire();
   const reminder = `<section class="card" style="gap:0;padding:6px 16px">
-      ${row(t("Напоминание о продлении подписки"), t("Раз в месяц покажет окно, чтобы не забыть продлить VPN"), sw(r.enabled, "toggle-reminder", t("Напоминание о продлении подписки")))}
-      ${r.enabled ? row(t("С какого числа"), t("Окно появится в этот день или позже, если компьютер был выключен"),
-          `<select id="rem-day" class="field" data-change="reminder-day">${Array.from({ length: 28 }, (_, i) => i + 1).map((d) => `<option value="${d}" ${d === r.day ? "selected" : ""}>${d}</option>`).join("")}</select>`, "rem-day")
+      ${row(t("Напоминание о продлении подписки"), t("Покажет окно, чтобы не забыть продлить VPN"), sw(r.enabled, "toggle-reminder", t("Напоминание о продлении подписки")))}
+      ${r.enabled ? row(t("Когда напоминать"), r.mode === "expire"
+          ? (exp ? t("Подписка действует до {date}", { date: dateText(exp) }) : t("Панель не сообщает срок подписки - напоминание сработает, когда он появится"))
+          : t("Раз в месяц, в выбранный день"),
+          seg(t("Когда напоминать"), "set-reminder-mode", r.mode, [["day", t("В день месяца")], ["expire", t("За 3 дня до конца")]])) : ""}
+      ${r.enabled && r.mode === "day" ? row(t("С какого числа"), t("Окно появится в этот день или позже, если компьютер был выключен"),
+          `<select id="rem-day" class="field" data-change="reminder-day">${Array.from({ length: 28 }, (_, i) => i + 1).map((d) => `<option value="${d}" ${d === r.day ? "selected" : ""}>${d}</option>`).join("")}</select>`, "rem-day") : ""}
+      ${r.enabled ? ""
         + row(t("Текст напоминания"), t("Например, кому написать или где оплатить. Пусто - общий текст"),
           `<input id="rem-note" class="field" style="width:280px" data-change="reminder-note" value="${esc(r.note)}" placeholder="${t("Пора продлить подписку на VPN.")}" />`, "rem-note") : ""}
     </section>`;
@@ -947,7 +1010,12 @@ function modalView(): string {
       <div class="modal-foot"><button class="btn-ghost" data-action="dismiss-clipboard">${t("Не сейчас")}</button><span class="grow"></span>
         <button class="btn-accent" data-action="accept-clipboard" ${m.busy ? "disabled" : ""}>${m.busy ? t("Добавляю…") : t("Добавить")}</button></div></div>`;
   } else if (m.kind === "reminder") {
-    const note = st.settings!.reminder.note.trim() || t("Пора продлить подписку на VPN.");
+    const r = st.settings!.reminder;
+    const exp = nearestExpire();
+    const generic = r.mode === "expire" && exp
+      ? t("Подписка закончится {date}. Пора продлить.", { date: dateText(exp) })
+      : t("Пора продлить подписку на VPN.");
+    const note = r.note.trim() || generic;
     body = `<div class="modal" role="dialog" aria-label="${t("Пора продлить подписку")}">${head(t("Пора продлить подписку"))}
       <div class="modal-body" style="flex-direction:row;align-items:center;gap:16px">
         <div style="flex-shrink:0">${mascot(72, mood())}</div>
@@ -995,16 +1063,24 @@ function render() {
 
 // ---------- напоминание о продлении ----------
 
-/** Раз в месяц, начиная с выбранного числа, выводит окно на передний план с напоминанием. */
+/** Выводит окно на передний план с напоминанием: раз в месяц с выбранного числа или за 3 дня
+ *  до конца подписки (по сроку от панели) - один раз на каждый срок. */
 async function checkReminder() {
   const s = st.settings;
   if (!s || !s.reminder.enabled || st.modal) return;
   const now = new Date();
-  if (now.getDate() < (s.reminder.day || 20)) return;
-  const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-  if (s.reminder.last_shown === month) return;
+  let mark: string;
+  if (s.reminder.mode === "expire") {
+    const exp = nearestExpire();
+    if (!exp || Date.now() < (exp - 3 * 86400) * 1000) return;
+    mark = `exp-${exp}`;
+  } else {
+    if (now.getDate() < (s.reminder.day || 20)) return;
+    mark = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  }
+  if (s.reminder.last_shown === mark) return;
   st.modal = { kind: "reminder" };
-  await saveSettings((x) => { x.reminder.last_shown = month; });
+  await saveSettings((x) => { x.reminder.last_shown = mark; });
   const win = getCurrentWindow();
   try { await win.unminimize(); await win.show(); await win.setFocus(); } catch { /* окно и так на экране */ }
 }
@@ -1030,12 +1106,14 @@ async function onAction(action: string, el: HTMLElement, ev: Event) {
     }
     case "select-server": {
       const id = el.dataset.id!;
-      if (id === st.settings!.selected) return;
-      st.settings = { ...st.settings!, selected: id };
+      const auto = id === "auto";
+      if (auto ? s.auto_server : !s.auto_server && id === s.selected) return;
+      st.settings = auto ? { ...s, auto_server: true } : { ...s, auto_server: false, selected: id };
+      if (!auto) st.autoNow = null;
       render();
       try {
         st.status = await invoke<Status>("select_server", { id });
-        if (st.status.running) { toast(t("Сервер переключён")); pingAll(); }
+        if (st.status.running) { toast(auto ? t("Включён «Авто»: лучший сервер выбирает ядро") : t("Сервер переключён")); pingAll(); }
       } catch (e) { toast(errText(e), true); await refreshStatus(); }
       return render();
     }
@@ -1237,6 +1315,7 @@ async function onAction(action: string, el: HTMLElement, ev: Event) {
       return render();
     }
     case "toggle-reminder": return saveSettings((x) => { x.reminder.enabled = !x.reminder.enabled; });
+    case "set-reminder-mode": return saveSettings((x) => { x.reminder.mode = el.dataset.value as "day" | "expire"; x.reminder.last_shown = null; });
     case "reminder-disable":
       st.modal = null;
       await saveSettings((x) => { x.reminder.enabled = false; });
@@ -1392,8 +1471,8 @@ async function init() {
 
   checkReminder();
   setInterval(checkReminder, 30 * 60 * 1000);
-  autoUpdateSubs();
-  setInterval(autoUpdateSubs, 15 * 60 * 1000);
+  autoUpdateSubs(true);
+  setInterval(() => autoUpdateSubs(), 15 * 60 * 1000);
   if (full.settings.servers.length) pingAll();
   st.autostart = await invoke<boolean>("get_autostart").catch(() => false);
   syncIndicators();

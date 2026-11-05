@@ -50,6 +50,21 @@ pub struct Subscription {
     /// Когда подписку последний раз обновили (секунды Unix) - для автообновления.
     #[serde(default)]
     pub updated: Option<u64>,
+    /// Трафик и срок из заголовка subscription-userinfo, если панель его отдаёт.
+    #[serde(default)]
+    pub info: Option<SubInfo>,
+}
+
+/// Сколько трафика потрачено и до какого числа действует подписка.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct SubInfo {
+    pub upload: u64,
+    pub download: u64,
+    /// Лимит трафика в байтах, 0 - без лимита.
+    pub total: u64,
+    /// Конец подписки (секунды Unix), None - бессрочно.
+    pub expire: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -117,7 +132,8 @@ pub struct Advanced {
     pub proxy_ips: Vec<String>,
     pub direct_ips: Vec<String>,
     /// Автообновление подписок раз в столько часов, 0 - выключено.
-    pub sub_update_hours: u32,
+    /// До 0.9.0 поле называлось sub_update_hours и было выключено - новое имя включает его всем.
+    pub subs_refresh_hours: u32,
     /// User-Agent при загрузке подписки; пусто - «ShredingerBox/версия».
     pub sub_user_agent: String,
 }
@@ -142,7 +158,7 @@ impl Default for Advanced {
             block_quic: false,
             proxy_ips: vec![],
             direct_ips: vec![],
-            sub_update_hours: 0,
+            subs_refresh_hours: 12,
             sub_user_agent: String::new(),
         }
     }
@@ -160,6 +176,8 @@ pub struct Reminder {
     /// Свой текст напоминания; пусто - общий «Пора продлить подписку».
     #[serde(default = "legacy_note")]
     pub note: String,
+    /// «day» - в выбранный день месяца, «expire» - за 3 дня до конца подписки.
+    pub mode: String,
 }
 
 /// До 0.8.0 напоминание было только для друзей: у них остаётся прежний текст.
@@ -169,7 +187,7 @@ fn legacy_note() -> String {
 
 impl Default for Reminder {
     fn default() -> Self {
-        Self { enabled: false, last_shown: None, day: 20, note: String::new() }
+        Self { enabled: false, last_shown: None, day: 20, note: String::new(), mode: "day".into() }
     }
 }
 
@@ -211,6 +229,8 @@ pub struct Settings {
     pub servers: Vec<Server>,
     pub subscriptions: Vec<Subscription>,
     pub selected: Option<String>,
+    /// «Авто»: ядро само берёт сервер с наименьшей задержкой и уходит с упавшего.
+    pub auto_server: bool,
     pub rules: Rules,
     pub advanced: Advanced,
     pub reminder: Reminder,
@@ -266,5 +286,10 @@ mod tests {
         let old_adv: Settings = serde_json::from_str(r#"{"advanced":{"enabled":true,"mixed_port":3000}}"#).unwrap();
         assert_eq!(old_adv.advanced.mixed_port, 3000);
         assert!(old_adv.advanced.sniff && old_adv.advanced.bypass_lan);
+        // Выключенное в 0.8 автообновление подписок с 0.9.0 включено всем.
+        let v08: Settings = serde_json::from_str(r#"{"advanced":{"sub_update_hours":0}}"#).unwrap();
+        assert_eq!(v08.advanced.subs_refresh_hours, 12);
+        assert_eq!(v08.reminder.mode, "day");
+        assert!(!v08.auto_server);
     }
 }

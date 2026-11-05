@@ -66,6 +66,12 @@ GitHub Actions собирает Windows и macOS, подписывает обн�
   `CHANGELOG.en.md`: на GitHub он идёт после строки **English**, а клиент на английском показывает только его.
 - Кроме установщика, в каждый релиз попадает `ShredingerBox_…_x64-portable.zip` (`scripts/make-portable.ps1`).
 
+- Версия sing-box и её SHA256 записаны в `scripts/sing-box.pin`, GitHub Actions в `release.yml`
+  закреплены по хешам коммитов. Сами они не обновляются. `release.bat` перед выпуском показывает,
+  что вышло новое (`scripts/check-updates.ps1`). Перед обновлением проверь, не было ли новостей о взломе
+  проекта. sing-box обновляется командой `scripts\update-sing-box.ps1 1.14.5`, Rust - строкой
+  `toolchain:` в `release.yml`. Новые версии Actions раз в месяц приносит Dependabot отдельным
+  pull request - принимать его только после проверки.
 - Ключи `.key` в репозиторий не попадают: они в `.gitignore`.
 - Подписки друзей хранятся у них на компьютерах, в репозитории их нет.
 - macOS-сборка подписана только ad-hoc (`signingIdentity: "-"` в `tauri.ci.conf.json`), без платного
