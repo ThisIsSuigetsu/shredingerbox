@@ -34,7 +34,7 @@ interface Settings {
   general: { autoconnect: boolean; close_to_tray: boolean; clipboard_offer: boolean; check_updates: boolean; theme: Theme; language: LangSetting };
   seen_version: string | null;
 }
-interface Status { running: boolean; mode: Mode; server: string | null; api_port: number; secret: string; elevated: boolean; windows: boolean; tun: boolean; portable: boolean; auto: boolean }
+interface Status { running: boolean; mode: Mode; server: string | null; api_port: number; secret: string; elevated: boolean; windows: boolean; tun: boolean; portable: boolean; auto: boolean; autostart: boolean }
 interface Preset { id: string; title: string; domains: string[] }
 interface Ping { id: string; ms: number | null; udp: boolean; via_vpn: boolean }
 interface Proc { name: string; exe: string }
@@ -837,8 +837,12 @@ function settingsView(): string {
     `<div class="seg inset" role="group" aria-label="${esc(label)}">${options
       .map(([v, l]) => `<button class="${value === v ? "on" : ""}" aria-pressed="${value === v}" data-action="${action}" data-value="${v}">${l}</button>`).join("")}</div>`;
   const behaviour = `<section class="card" style="gap:0;padding:6px 16px">
-      ${windows ? row(t("Запускать вместе с Windows"), t("Сразу с правами администратора - TUN без окна UAC"), sw(st.autostart, "toggle-autostart", t("Запускать вместе с Windows"), st.autostartBusy))
-        + row(t("Подключаться при автозапуске"), t("Клиент стартует в трее и сразу включает VPN"), sw(g.autoconnect, "toggle-autoconnect", t("Подключаться при автозапуске"))) : ""}
+      ${st.status?.autostart ? (windows
+          ? row(t("Запускать вместе с Windows"), t("Сразу с правами администратора - TUN без окна UAC"), sw(st.autostart, "toggle-autostart", t("Запускать вместе с Windows"), st.autostartBusy))
+          : row(t("Запускать при входе в macOS"), t("Клиент стартует в строке меню, окно не открывается"), sw(st.autostart, "toggle-autostart", t("Запускать при входе в macOS"), st.autostartBusy)))
+        + row(t("Подключаться при автозапуске"), windows || s.mode !== "tun"
+          ? t("Клиент стартует в трее и сразу включает VPN")
+          : t("В режиме TUN macOS при входе спросит пароль администратора"), sw(g.autoconnect, "toggle-autoconnect", t("Подключаться при автозапуске"))) : ""}
       ${row(t("Проверять обновления"), t("Версия {v} · новые версии приходят с GitHub", { v: esc(APP_VERSION) + (st.status?.portable ? " · portable" : "") }),
         `<button class="btn-ghost" data-action="check-update-now" style="height:36px">${t("Проверить")}</button>${sw(g.check_updates, "toggle-updates", t("Проверять обновления"))}`)}
       ${row(t("Предлагать ключи из буфера обмена"), t("Скопировал ключ или подписку - открыл клиент - он предложит добавить"), sw(g.clipboard_offer, "toggle-clipboard", t("Предлагать ключи из буфера обмена")))}

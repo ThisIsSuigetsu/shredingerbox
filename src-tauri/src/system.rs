@@ -390,10 +390,70 @@ pub fn autostart_enabled() -> bool {
     {
         schtasks(&["/Query", "/TN", TASK_NAME])
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = TASK_NAME;
+        mac_autostart::plist_path().is_some_and(|p| p.exists())
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     {
         let _ = TASK_NAME;
         false
+    }
+}
+
+/// Автозапуск на macOS: LaunchAgent в ~/Library/LaunchAgents, запускается при входе в систему.
+#[cfg(target_os = "macos")]
+mod mac_autostart {
+    use std::path::PathBuf;
+
+    const LABEL: &str = "org.shredingerbox.app";
+
+    pub fn plist_path() -> Option<PathBuf> {
+        let home = std::env::var_os("HOME")?;
+        Some(PathBuf::from(home).join("Library/LaunchAgents").join(format!("{LABEL}.plist")))
+    }
+
+    fn xml_escape(s: &str) -> String {
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    }
+
+    pub fn set(enable: bool) -> Result<(), String> {
+        use crate::i18n::tr;
+        let path = plist_path().ok_or("HOME not set")?;
+        if !enable {
+            let _ = std::fs::remove_file(&path);
+            return Ok(());
+        }
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let exe_str = exe.to_string_lossy();
+        // Из образа DMG или из «карантинной» копии macOS приложение после перезагрузки не найдётся.
+        if exe_str.starts_with("/Volumes/") || exe_str.contains("/AppTranslocation/") {
+            return Err(tr(
+                "Сначала перетащи ShredingerBox в «Программы» и запусти оттуда - иначе после перезагрузки он не найдётся",
+                "Move ShredingerBox to Applications and start it from there first - otherwise it won't be found after a restart",
+            )
+            .into());
+        }
+        let plist = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{LABEL}</string>
+  <key>ProgramArguments</key>
+  <array><string>{exe}</string><string>--autostart</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>ProcessType</key><string>Interactive</string>
+</dict>
+</plist>
+"#,
+            exe = xml_escape(&exe_str)
+        );
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&path, plist).map_err(|e| e.to_string())
     }
 }
 
@@ -480,10 +540,16 @@ pub fn set_autostart(enable: bool, data_dir: &std::path::Path) -> Result<bool, S
         }
         Ok(autostart_enabled())
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = data_dir;
+        mac_autostart::set(enable)?;
+        Ok(autostart_enabled())
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     {
         let _ = (enable, data_dir);
-        Err(crate::i18n::tr("Автозапуск пока есть только в Windows", "Autostart is only available on Windows for now").into())
+        Err(crate::i18n::tr("Автозапуск пока есть только в Windows и macOS", "Autostart is only available on Windows and macOS").into())
     }
 }
 

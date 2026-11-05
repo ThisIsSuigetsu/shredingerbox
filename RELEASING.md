@@ -78,4 +78,4 @@ GitHub Actions собирает Windows и macOS, подписывает обн�
   сертификата Apple. Без этой подписи macOS на M1+ называет приложение «повреждённым». Первый запуск -
   правый клик → «Открыть» или «Всё равно открыть» в настройках безопасности, подробности в `FRIENDS.md`.
   На Mac «Прокси» включает системный прокси через `networksetup`, а TUN запускает ядро от root через
-  `osascript … with administrator privileges` (пароль при каждом подключении). Автозапуска на Mac нет.
+  `osascript … with administrator privileges` (пароль при каждом подключении). Автозапуск на Mac - LaunchAgent в `~/Library/LaunchAgents`.

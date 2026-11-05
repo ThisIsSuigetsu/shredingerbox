@@ -43,7 +43,8 @@ foreach ($line in $workflow) {
         continue
     }
     $r = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest" -Headers $headers
-    if ($r.tag_name -ne $tag) {
+    # У tauri-action метки вида «action-v1.0.0», а Dependabot пишет в комментарий «v1.0.0».
+    if (($r.tag_name -replace '^action-', '') -ne ($tag -replace '^action-', '')) {
         $found++
         Write-Host "${repo}: в сборке $tag, вышла $($r.tag_name) ($(Days $r.published_at) дн. назад)" -ForegroundColor Yellow
     } else {

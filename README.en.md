@@ -34,7 +34,7 @@ Add a subscription, press one button, you're connected. Fine-tuning lives in adv
 
 **Convenience**
 - Lives in the tray; the tray and taskbar icons show whether the VPN is on.
-- Autostart with Windows and auto-connect; TUN works without the UAC prompt.
+- Autostart with Windows or macOS and auto-connect; on Windows TUN works without the UAC prompt.
 - Auto-update via GitHub Releases.
 - Service check: do YouTube, Discord, ChatGPT and others open through the current connection.
 - Settings export and import in one file.
@@ -69,7 +69,7 @@ xattr -dr com.apple.quarantine /Applications/ShredingerBox.app
 ```
 
 On Mac, Proxy mode is the default; TUN asks for the administrator password on every connect.
-Autostart isn't available on Mac yet.
+Autostart works from Settings once the app is in Applications.
 
 ## Development
 

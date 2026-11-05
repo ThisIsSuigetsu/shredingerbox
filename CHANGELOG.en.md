@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.1
+
+- macOS: autostart. Settings → Start at macOS login - the app starts in the menu bar without
+  a window and, if Connect on autostart is on, turns the VPN on right away.
+- Minor fixes.
+
 ## 0.9.0
 
 - Subscriptions update by themselves: when the app starts and every 12 hours. New and changed

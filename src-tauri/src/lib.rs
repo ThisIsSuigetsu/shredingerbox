@@ -103,6 +103,7 @@ impl AppState {
             tun: settings::TUN_AVAILABLE,
             portable: self.portable,
             auto: s.auto_server,
+            autostart: cfg!(any(windows, target_os = "macos")),
         }
     }
 }
@@ -122,6 +123,8 @@ struct Status {
     portable: bool,
     /// Выбран «Авто»: сервер выбирает ядро.
     auto: bool,
+    /// Есть ли автозапуск на этой системе (Windows, macOS).
+    autostart: bool,
 }
 
 #[derive(Serialize)]
